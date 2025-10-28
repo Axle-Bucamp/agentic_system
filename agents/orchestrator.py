@@ -12,7 +12,7 @@ from core.models import (
 )
 from core.config import settings
 from core.logging import log
-from core.exchange_manager import ExchangeManager
+from core.dex_simulator_client import dex_simulator_client, DEXSimulatorError
 from core.exchange_interface import ExchangeType, OrderSide, OrderType
 from agents.base_agent import BaseAgent
 
@@ -24,58 +24,17 @@ class OrchestratorAgent(BaseAgent):
         super().__init__(AgentType.ORCHESTRATOR, redis_client)
         self.pending_signals: Dict[str, List[AgentSignal]] = {}
         self.pending_validations: Dict[str, HumanValidationRequest] = {}
-        self.exchange_manager: Optional[ExchangeManager] = None
+        self.dex_client = dex_simulator_client
         
     async def initialize(self):
         """Initialize orchestrator."""
-        # Initialize exchange manager
-        self.exchange_manager = ExchangeManager()
-        
-        # Add exchanges based on configuration
-        if settings.environment == "test" or settings.environment == "development":
-            # Use mock exchanges for testing/development
-            from tests.mocks.mock_dex_exchange import MockDEXExchange
-            from tests.mocks.mock_mexc_exchange import MockMEXCExchange
-            
-            dex_config = {"mock_mode": True}
-            dex_exchange = MockDEXExchange(dex_config)
-            self.exchange_manager.add_exchange(dex_exchange, is_primary=True)
-            
-            mexc_config = {"mock_mode": True}
-            mexc_exchange = MockMEXCExchange(mexc_config)
-            self.exchange_manager.add_exchange(mexc_exchange, is_primary=False)
-        else:
-            # Use real exchanges for production
-            from core.exchanges.dex_exchange import DEXExchange
-            from core.exchanges.mexc_exchange import MEXCExchange
-            
-            # DEX configuration
-            dex_config = {
-                "network": "ethereum",
-                "rpc_url": settings.eth_rpc_url,
-                "private_key": settings.private_key,
-                "mock_mode": False
-            }
-            dex_exchange = DEXExchange(dex_config)
-            self.exchange_manager.add_exchange(dex_exchange, is_primary=True)
-            
-            # MEXC configuration
-            mexc_config = {
-                "api_key": settings.mexc_api_key,
-                "secret_key": settings.mexc_secret_key,
-                "mock_mode": False
-            }
-            mexc_exchange = MEXCExchange(mexc_config)
-            self.exchange_manager.add_exchange(mexc_exchange, is_primary=False)
-        
-        # Connect to all exchanges
-        await self.exchange_manager.connect_all()
-        
-        # Enable paper trading in development/test
-        if settings.environment in ["test", "development"]:
-            self.exchange_manager.set_paper_trading(True)
-        
-        log.info("Orchestrator Agent initialized with exchange manager")
+        # Connect to DEX simulator
+        try:
+            await self.dex_client.connect()
+            log.info("Orchestrator Agent initialized with DEX simulator")
+        except Exception as e:
+            log.error(f"Failed to connect to DEX simulator: {e}")
+            raise
     
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         """Process incoming messages from other agents."""
@@ -268,7 +227,7 @@ class OrchestratorAgent(BaseAgent):
                 return None
             
             # Calculate quantity based on portfolio
-            portfolio = await self.get_portfolio()
+            portfolio = await self._get_portfolio_from_dex()
             if not portfolio:
                 return None
             
@@ -371,7 +330,7 @@ class OrchestratorAgent(BaseAgent):
         # 2. High-risk assets (tier 3-4)
         # 3. Low confidence (<0.75)
         
-        portfolio = await self.get_portfolio()
+        portfolio = await self._get_portfolio_from_dex()
         if not portfolio:
             return True  # Require validation if portfolio unavailable
         
@@ -441,38 +400,30 @@ class OrchestratorAgent(BaseAgent):
             log.error(f"Error requesting human validation: {e}")
     
     async def _execute_trade(self, decision: TradeDecision):
-        """Execute a trade via the exchange manager."""
+        """Execute a trade via the DEX simulator."""
         try:
-            if not self.exchange_manager:
-                log.error("Exchange manager not initialized")
+            if not self.dex_client or not self.dex_client.client:
+                log.error("DEX simulator client not initialized")
                 return
             
-            # Convert action to exchange format
-            order_side = OrderSide.BUY if decision.action == TradeAction.BUY else OrderSide.SELL
-            order_type = OrderType.MARKET  # Use market orders for now
+            result = None
             
-            # Determine exchange based on ticker or configuration
-            exchange_type = None
-            if decision.ticker in ["BTC", "ETH", "SOL"]:  # Major cryptos - use DEX
-                exchange_type = ExchangeType.DEX
-            else:  # Other assets - use MEXC
-                exchange_type = ExchangeType.MEXC
+            if decision.action == TradeAction.BUY:
+                # Buy: amount in USDC
+                trade_amount_usdc = decision.quantity * decision.expected_price
+                result = await self.dex_client.buy_asset(decision.ticker, trade_amount_usdc)
+            else:  # SELL
+                # Sell: amount in asset units
+                result = await self.dex_client.sell_asset(decision.ticker, decision.quantity)
             
-            # Convert ticker format for exchange
-            if exchange_type == ExchangeType.DEX:
-                symbol = f"{decision.ticker}USDC"
-            else:  # MEXC
-                symbol = f"{decision.ticker}USDT"
+            # Check if trade was successful
+            if not result or not result.get("success", False):
+                log.error(f"Trade failed for {decision.ticker}: {result.get('error', 'Unknown error')}")
+                return
             
-            # Execute trade
-            order = await self.exchange_manager.place_order(
-                symbol=symbol,
-                side=order_side,
-                order_type=order_type,
-                amount=decision.quantity,
-                price=decision.expected_price,
-                exchange_type=exchange_type
-            )
+            # Get current price after execution
+            portfolio = await self.dex_client.get_portfolio_status()
+            current_price = portfolio.get("prices", {}).get(decision.ticker, decision.expected_price)
             
             # Create execution record
             execution = TradeExecution(
@@ -480,11 +431,14 @@ class OrchestratorAgent(BaseAgent):
                 ticker=decision.ticker,
                 action=decision.action,
                 quantity=decision.quantity,
-                executed_price=order.average_price or decision.expected_price,
-                total_cost=decision.quantity * (order.average_price or decision.expected_price),
-                fee=order.fee,
-                success=order.is_filled
+                executed_price=current_price,
+                total_cost=decision.quantity * current_price,
+                fee=decision.quantity * current_price * 0.001,  # 0.1% fee
+                success=True
             )
+            
+            # Update portfolio in Redis
+            await self.redis.set_json("state:portfolio", portfolio)
             
             # Notify other agents
             await self._notify_trade_executed(execution, decision)
@@ -496,6 +450,8 @@ class OrchestratorAgent(BaseAgent):
                 f"Confidence: {decision.confidence:.2f} | {decision.reasoning}"
             )
             
+        except DEXSimulatorError as e:
+            log.error(f"DEX simulator error: {e}")
         except Exception as e:
             log.error(f"Error executing trade: {e}")
     
@@ -533,4 +489,16 @@ class OrchestratorAgent(BaseAgent):
                 
         except Exception as e:
             log.error(f"Error cleaning up validations: {e}")
+    
+    async def _get_portfolio_from_dex(self) -> Optional[Dict]:
+        """Get portfolio data from DEX simulator."""
+        try:
+            if not self.dex_client or not self.dex_client.client:
+                log.warning("DEX client not available, using cached portfolio")
+                return await self.get_portfolio()
+            
+            return await self.dex_client.get_portfolio_status()
+        except Exception as e:
+            log.error(f"Error getting portfolio from DEX: {e}")
+            return await self.get_portfolio()
 
