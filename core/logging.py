@@ -1,0 +1,66 @@
+"""
+Logging configuration for the Agentic Trading System.
+"""
+import sys
+from pathlib import Path
+from loguru import logger
+from core.config import settings
+
+
+def setup_logging():
+    """Configure loguru logger with appropriate settings."""
+    
+    # Remove default handler
+    logger.remove()
+    
+    # Console handler with colors
+    logger.add(
+        sys.stdout,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level=settings.log_level,
+        colorize=True,
+    )
+    
+    # File handler for all logs
+    log_path = Path(settings.log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    logger.add(
+        settings.log_file,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        level="DEBUG",
+        rotation="100 MB",
+        retention="30 days",
+        compression="zip",
+    )
+    
+    # Separate file for errors
+    error_log_path = log_path.parent / "errors.log"
+    logger.add(
+        str(error_log_path),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        level="ERROR",
+        rotation="50 MB",
+        retention="90 days",
+        compression="zip",
+    )
+    
+    # Separate file for trading decisions
+    trading_log_path = log_path.parent / "trading_decisions.log"
+    logger.add(
+        str(trading_log_path),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {message}",
+        level="INFO",
+        filter=lambda record: "TRADE_DECISION" in record["extra"],
+        rotation="50 MB",
+        retention="365 days",
+        compression="zip",
+    )
+    
+    logger.info(f"Logging initialized - Level: {settings.log_level}, File: {settings.log_file}")
+    return logger
+
+
+# Initialize logger
+log = setup_logging()
+

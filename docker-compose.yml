@@ -1,0 +1,361 @@
+
+services:
+  # Redis for caching, pub/sub, and shared state
+  redis:
+    image: redis:7-alpine
+    container_name: ats-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    networks:
+      - ats-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # PostgreSQL for persistent storage
+  postgres:
+    image: postgres:16-alpine
+    container_name: ats-postgres
+    environment:
+      POSTGRES_DB: trading_system
+      POSTGRES_USER: trading_user
+      POSTGRES_PASSWORD: trading_pass_change_in_prod
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./config/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - ats-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_system"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # DEX Simulator (adapted from OffChainDexTradeSim)
+  dex-simulator:
+    build:
+      context: ./dex-simulator
+      dockerfile: Dockerfile
+    container_name: ats-dex-simulator
+    ports:
+      - "8001:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - INITIAL_BALANCE=1000.0
+      - TRADING_FEE=0.001
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Main Trading System API
+  trading-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ats-trading-api
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading_user
+      - POSTGRES_PASSWORD=trading_pass_change_in_prod
+      - DEX_SIMULATOR_URL=http://dex-simulator:8000
+      - MCP_API_URL=https://forecasting.guidry-cloud.com
+      - MCP_API_KEY=${MCP_API_KEY:-mock_api_key}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-mock_openai_key}
+      - VLLM_ENDPOINT=${VLLM_ENDPOINT:-http://localhost:8002/v1}
+      - INITIAL_CAPITAL=1000.0
+      - MAX_POSITION_SIZE=0.20
+      - ENVIRONMENT=development
+      - USE_MOCK_SERVICES=true
+      - SENTRY_DSN=${SENTRY_DSN}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-change-in-production}
+      - RATE_LIMIT_REDIS_URL=redis://redis:6379/1
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./config:/app/config
+      - /tmp/prometheus:/tmp/prometheus
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      dex-simulator:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Memory Agent Service
+  memory-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        AGENT_NAME: memory
+    container_name: ats-memory-agent
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading_user
+      - POSTGRES_PASSWORD=trading_pass_change_in_prod
+      - AGENT_NAME=memory
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # DQN Decision Agent Service
+  dqn-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        AGENT_NAME: dqn
+    container_name: ats-dqn-agent
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MCP_API_URL=https://forecasting.guidry-cloud.com
+      - MCP_API_KEY=${MCP_API_KEY}
+      - AGENT_NAME=dqn
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # Chart Analysis Agent Service
+  chart-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        AGENT_NAME: chart
+    container_name: ats-chart-agent
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - AGENT_NAME=chart
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # Risk Analysis Agent Service
+  risk-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        AGENT_NAME: risk
+    container_name: ats-risk-agent
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading_user
+      - POSTGRES_PASSWORD=trading_pass_change_in_prod
+      - AGENT_NAME=risk
+      - MAX_POSITION_SIZE=0.20
+      - MAX_DAILY_LOSS=0.05
+      - MAX_DRAWDOWN=0.15
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # News Feed Agent Service
+  news-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        AGENT_NAME: news
+    container_name: ats-news-agent
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - VLLM_ENDPOINT=${VLLM_ENDPOINT:-http://localhost:8002/v1}
+      - AGENT_NAME=news
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # Copy Trade Agent Service
+  copytrade-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        AGENT_NAME: copytrade
+    container_name: ats-copytrade-agent
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading_user
+      - POSTGRES_PASSWORD=trading_pass_change_in_prod
+      - AGENT_NAME=copytrade
+      - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed.binance.org/}
+      - ETH_RPC_URL=${ETH_RPC_URL:-https://eth.llamarpc.com}
+      - SOL_RPC_URL=${SOL_RPC_URL:-https://api.mainnet-beta.solana.com}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # Orchestrator Agent Service
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+      args:
+        AGENT_NAME: orchestrator
+    container_name: ats-orchestrator
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading_user
+      - POSTGRES_PASSWORD=trading_pass_change_in_prod
+      - DEX_SIMULATOR_URL=http://dex-simulator:8000
+      - AGENT_NAME=orchestrator
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      dex-simulator:
+        condition: service_healthy
+      memory-agent:
+        condition: service_started
+      dqn-agent:
+        condition: service_started
+      chart-agent:
+        condition: service_started
+      risk-agent:
+        condition: service_started
+      news-agent:
+        condition: service_started
+      copytrade-agent:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ats-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ats-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin_change_in_prod
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: ats-jaeger
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+    networks:
+      - ats-network
+
+networks:
+  ats-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
