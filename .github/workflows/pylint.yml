@@ -1,0 +1,49 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Cache pip
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml', '**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # Prefer project dev dependencies
+        pip install -e .[dev] || true
+        # Ensure core linters are present regardless
+        pip install ruff mypy black isort pylint
+    - name: Ruff
+      run: |
+        ruff check .
+    - name: Black (check)
+      run: |
+        black --check .
+    - name: isort (check-only)
+      run: |
+        isort --check-only .
+    - name: mypy
+      run: |
+        mypy .
+    - name: pylint
+      run: |
+        pylint --disable=C0114,C0115,C0116 $(git ls-files '*.py')
