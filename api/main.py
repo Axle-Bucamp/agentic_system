@@ -199,8 +199,9 @@ async def general_exception_handler(request: Request, exc: Exception):
 # Enhanced health check with dependencies
 @app.get("/health")
 @rate_limit(max_requests=10, window_seconds=60)
-async def health_check():
+async def health_check(request: Request):
     """Comprehensive health check endpoint."""
+    log.debug(f"Health check requested from {request.client.host if request.client else 'unknown'}")
     health_status = {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
@@ -219,23 +220,32 @@ async def health_check():
     
     # Check exchange manager
     try:
-        if exchange_manager.is_connected():
-            health_status["dependencies"]["exchanges"] = "healthy"
+        # Check if exchange manager has any connected exchanges
+        status = exchange_manager.get_status()
+        connected_count = sum(1 for ex in status.get("exchanges", {}).values() if ex.get("connected", False))
+        if connected_count > 0:
+            health_status["dependencies"]["exchanges"] = f"healthy ({connected_count} connected)"
         else:
             health_status["dependencies"]["exchanges"] = "disconnected"
             health_status["status"] = "degraded"
+        log.debug(f"Exchange manager status: {status}")
     except Exception as e:
+        log.error(f"Exchange manager health check failed: {e}")
         health_status["dependencies"]["exchanges"] = f"unhealthy: {str(e)}"
         health_status["status"] = "degraded"
     
     # Check forecasting API
     try:
-        if await forecasting_client.health_check():
+        # Check if forecasting client is connected
+        if hasattr(forecasting_client, 'client') and forecasting_client.client is not None:
             health_status["dependencies"]["forecasting_api"] = "healthy"
+            log.debug("Forecasting API client is connected")
         else:
-            health_status["dependencies"]["forecasting_api"] = "unhealthy"
+            health_status["dependencies"]["forecasting_api"] = "disconnected"
             health_status["status"] = "degraded"
+            log.warning("Forecasting API client is not connected")
     except Exception as e:
+        log.error(f"Forecasting API health check failed: {e}")
         health_status["dependencies"]["forecasting_api"] = f"unhealthy: {str(e)}"
         health_status["status"] = "degraded"
     

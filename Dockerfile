@@ -1,23 +1,22 @@
-# Multi-stage build for UV
-FROM ghcr.io/astral-sh/uv:latest AS uv
+# Use uv base image with Python pre-installed
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm
 
-FROM python:3.11-slim
+# Set working directory
+WORKDIR /app
 
-# Install system dependencies
+# Environment for reliable installs
+ENV UV_HTTP_TIMEOUT=300 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install system dependencies (minimal, build tools are preinstalled in uv image)
 RUN apt-get update && apt-get install -y \
-    build-essential \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy UV from the UV image
-COPY --from=uv /uv /bin/uv
-
-WORKDIR /app
-
 # Copy requirements and install dependencies
-COPY requirements.txt ./
-# Use uv for fast, deterministic installs
+COPY requirements-base.txt ./requirements.txt
 RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy application code
@@ -33,6 +32,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the application (no reload in production)
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application using uv run for better dependency management
+CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 

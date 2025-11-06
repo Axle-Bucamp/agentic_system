@@ -60,6 +60,15 @@ if _models_py_path.exists():
         TradeExecution = _models_py.TradeExecution
     else:
         TradeExecution = None
+    if hasattr(_models_py, 'Portfolio'):
+        Portfolio = _models_py.Portfolio
+    else:
+        Portfolio = None
+    # ExchangeType is in exchange_interface, not models.py
+    try:
+        from core.exchange_interface import ExchangeType
+    except ImportError:
+        ExchangeType = None
 else:
     # Fallback: raise error if models.py not found
     raise ImportError(f"Could not find models.py at {_models_py_path}")
@@ -92,4 +101,8 @@ if HumanValidationResponse is not None:
     __all__.append("HumanValidationResponse")
 if TradeExecution is not None:
     __all__.append("TradeExecution")
+if Portfolio is not None:
+    __all__.append("Portfolio")
+if ExchangeType is not None:
+    __all__.append("ExchangeType")
 

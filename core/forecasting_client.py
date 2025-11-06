@@ -60,8 +60,16 @@ class ForecastingClient:
                 self.mock_service = await get_mock_forecasting_service()
                 await self._setup_mock_data()
             
-            log.info(f"Forecasting API client connected to {self.base_url}")
-            
+            log.info(f"Forecasting API client connected to {self.base_url}")     
+              
+        except Exception as e:
+            log.error(f"Failed to connect to forecasting API: {e}")
+            raise ForecastingAPIError(f"Connection failed: {e}")
+    
+    async def initialize(self) -> None:
+        """Initialize the forecasting client (alias for connect)."""
+        try:
+            await self.connect()        
         except Exception as e:
             log.error(f"Failed to connect to forecasting API: {e}")
             raise ForecastingAPIError(f"Connection failed: {e}")

@@ -20,6 +20,8 @@ services:
       timeout: 3s
       retries: 3
 
+  # future -> logfire for logging
+
   # PostgreSQL for persistent storage
   postgres:
     image: postgres:16-alpine
@@ -54,11 +56,36 @@ services:
     restart: unless-stopped
     networks:
       - ats-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+    # Health check disabled - Qdrant starts quickly and services can connect when ready
+    # The Qdrant client will handle connection retries
+    # healthcheck:
+    #   test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:6333/health || exit 0"]
+    #   interval: 15s
+    #   timeout: 5s
+    #   retries: 5
+    #   start_period: 30s
+
+  # Ollama for lightweight embeddings (tiny model, ~137MB)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ats-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - ats-network
+    # Health check disabled - Ollama may take time to initialize
+    # Services can start without waiting for Ollama to be fully ready
+    # The embedding client will handle connection retries
+    # healthcheck:
+    #   test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 0"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 120s
+    # Note: Model will be pulled on first use, or manually with: docker exec ats-ollama ollama pull nomic-embed-text
 
   # DEX Simulator (adapted from OffChainDexTradeSim)
   dex-simulator:
@@ -111,6 +138,9 @@ services:
       - VLLM_ENDPOINT=${VLLM_ENDPOINT:-http://localhost:8002/v1}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - OLLAMA_URL=http://ollama:11434
+      - MEMORY_EMBEDDING_PROVIDER=ollama
+      - BLOCKSCOUT_MCP_URL=http://blockscout-mcp:8080
       - FAKE_TRADING=true
       - INITIAL_CAPITAL=1000.0
       - MAX_POSITION_SIZE=0.20
@@ -352,6 +382,9 @@ services:
       - DEX_SIMULATOR_URL=http://dex-simulator:8000
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - OLLAMA_URL=http://ollama:11434
+      - MEMORY_EMBEDDING_PROVIDER=ollama
+      - BLOCKSCOUT_MCP_URL=http://blockscout-mcp:8080
       - MCP_API_URL=https://forecasting.guidry-cloud.com
       - MCP_API_KEY=${MCP_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -364,7 +397,11 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
+        condition: service_started
+      ollama:
+        condition: service_started
+      blockscout-mcp:
+        condition: service_started
       dex-simulator:
         condition: service_healthy
     restart: unless-stopped
@@ -372,38 +409,58 @@ services:
       - ats-network
 
   # Prometheus for monitoring
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: ats-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    restart: unless-stopped
-    networks:
-      - ats-network
+  #prometheus:
+  #  image: prom/prometheus:latest
+  #  container_name: ats-prometheus
+  #  ports:
+  #    - "9090:9090"
+  #  volumes:
+  #    - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+  #    - prometheus_data:/prometheus
+  #  command:
+  #    - '--config.file=/etc/prometheus/prometheus.yml'
+  #    - '--storage.tsdb.path=/prometheus'
+  #  restart: unless-stopped
+  #  networks:
+  #    - ats-network
 
   # Grafana for dashboards
-  grafana:
-    image: grafana/grafana:latest
-    container_name: ats-grafana
+  #grafana:
+  #  image: grafana/grafana:latest
+  #  container_name: ats-grafana
+  #  ports:
+  #    - "3000:3000"
+  #  environment:
+  #    - GF_SECURITY_ADMIN_PASSWORD=admin_change_in_prod
+  #    - GF_USERS_ALLOW_SIGN_UP=false
+  #  volumes:
+  #    - grafana_data:/var/lib/grafana
+  #    - ./config/grafana:/etc/grafana/provisioning
+  #  depends_on:
+  #    - prometheus
+  #  restart: unless-stopped
+  #  networks:
+  #    - ats-network
+
+  # Blockscout MCP Proxy - connects to Blockscout MCP for on-chain data
+  blockscout-mcp:
+    image: sparfenyuk/mcp-proxy:latest
+    container_name: ats-blockscout-mcp
+    command:
+      - "--transport"
+      - "streamablehttp"
+      - "https://mcp.blockscout.com/mcp"
     ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin_change_in_prod
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./config/grafana:/etc/grafana/provisioning
-    depends_on:
-      - prometheus
+      - "8080:8080"
     restart: unless-stopped
     networks:
       - ats-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # Tools proxy (optional): internal proxy to external MCP endpoints for stable networking & CORS
   tools-proxy:
@@ -454,6 +511,7 @@ volumes:
   redis_data:
   postgres_data:
   qdrant_data:
+  ollama_data:
   prometheus_data:
   grafana_data:
 

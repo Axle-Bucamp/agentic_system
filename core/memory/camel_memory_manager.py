@@ -82,10 +82,10 @@ class CamelMemoryManager:
             )
             
             # Create vector DB block
+            # Note: retrieve_limit is set on LongtermAgentMemory, not VectorDBBlock
             vector_db_block = VectorDBBlock(
                 storage=qdrant_storage,
-                embedding=embedding,
-                retrieve_limit=settings.memory_retrieve_limit
+                embedding=embedding
             )
             
             # Create context creator

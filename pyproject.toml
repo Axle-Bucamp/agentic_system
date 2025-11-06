@@ -51,7 +51,6 @@ dependencies = [
     "camel-ai>=0.1.0",
     # Vector Database and Embeddings
     "qdrant-client>=1.7.0",
-    "sentence-transformers>=2.2.0",
     "llm-guard>=0.3.0",
     # "agentic-radar>=0.14.0",  # Not available on PyPI
     # "garak>=2.0.0",  # Version conflict

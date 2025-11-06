@@ -55,13 +55,17 @@ class WorkforceOrchestratorAgent(BaseAgent):
             raise ImportError("CAMEL Workforce not installed. Install with: pip install camel-ai")
         
         try:
+            log.info("Initializing Workforce Orchestrator...")
             # Initialize memory
+            log.debug("Initializing memory manager...")
             self.memory_manager = CamelMemoryManager(
                 agent_id="workforce_orchestrator",
                 collection_name="workforce_orchestrator_memory"
             )
+            log.debug("Memory manager initialized successfully")
             
             # Create coordinator agent
+            log.debug("Creating coordinator agent...")
             coordinator_model = CamelModelFactory.create_coordinator_model()
             coordinator_agent = ChatAgent(
                 system_message=BaseMessage.make_assistant_message(
@@ -80,6 +84,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
             )
             
             # Create task decomposition agent
+            log.debug("Creating task decomposition agent...")
             task_model = CamelModelFactory.create_task_model()
             task_agent = ChatAgent(
                 system_message=BaseMessage.make_assistant_message(
@@ -94,16 +99,42 @@ class WorkforceOrchestratorAgent(BaseAgent):
             )
             
             # Initialize workers
+            log.debug("Initializing workers...")
             await self._initialize_workers()
+            log.info(f"Initialized {len(self.workers)} workers successfully")
             
             # Create workforce
-            self.workforce = Workforce(
-                description="Trading System Workforce - Coordinates specialized workers for trading tasks",
-                coordinator_agent=coordinator_agent,
-                task_agent=task_agent,
-                use_structured_output_handler=True,
-                share_memory=True,
-            )
+            log.debug("Creating Workforce instance...")
+            # Note: CAMEL Workforce may use different parameter names
+            # Try with coordinator and task_agent, or use default initialization
+            try:
+                # Try the new API first (if coordinator_agent is not supported)
+                self.workforce = Workforce(
+                    description="Trading System Workforce - Coordinates specialized workers for trading tasks",
+                    coordinator=coordinator_agent,
+                    task_agent=task_agent,
+                    use_structured_output_handler=True,
+                    share_memory=True,
+                )
+                log.info("Workforce created with coordinator parameter")
+            except TypeError as e:
+                log.warning(f"Workforce initialization with coordinator failed: {e}, trying alternative")
+                try:
+                    # Try without explicit coordinator/task_agent (they may be created internally)
+                    self.workforce = Workforce(
+                        description="Trading System Workforce - Coordinates specialized workers for trading tasks",
+                        use_structured_output_handler=True,
+                        share_memory=True,
+                    )
+                    # Manually set coordinator and task agent if possible
+                    if hasattr(self.workforce, 'coordinator'):
+                        self.workforce.coordinator = coordinator_agent
+                    if hasattr(self.workforce, 'task_agent'):
+                        self.workforce.task_agent = task_agent
+                    log.info("Workforce created with default initialization and manual agent assignment")
+                except Exception as e2:
+                    log.error(f"All Workforce initialization attempts failed: {e2}")
+                    raise
             
             # Add workers to workforce
             await self._add_workers_to_workforce()
@@ -154,6 +185,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
             return
         
         try:
+            added_count = 0
             # Add DQN worker
             dqn_worker = self.workers["dqn"]
             worker_agent = dqn_worker.agent
@@ -162,6 +194,10 @@ class WorkforceOrchestratorAgent(BaseAgent):
                     description=dqn_worker.get_description(),
                     worker=worker_agent,
                 )
+                added_count += 1
+                log.debug(f"Added DQN worker to workforce: {dqn_worker.get_description()}")
+            else:
+                log.warning("DQN worker agent is None, skipping")
             
             # Add Chart Analysis worker
             chart_worker = self.workers["chart"]
@@ -170,6 +206,10 @@ class WorkforceOrchestratorAgent(BaseAgent):
                     description=chart_worker.get_description(),
                     worker=chart_worker.agent,
                 )
+                added_count += 1
+                log.debug(f"Added Chart Analysis worker to workforce: {chart_worker.get_description()}")
+            else:
+                log.warning("Chart Analysis worker agent is None, skipping")
             
             # Add Risk Assessment worker
             risk_worker = self.workers["risk"]
@@ -178,6 +218,10 @@ class WorkforceOrchestratorAgent(BaseAgent):
                     description=risk_worker.get_description(),
                     worker=risk_worker.agent,
                 )
+                added_count += 1
+                log.debug(f"Added Risk Assessment worker to workforce: {risk_worker.get_description()}")
+            else:
+                log.warning("Risk Assessment worker agent is None, skipping")
             
             # Add Market Research worker
             research_worker = self.workers["research"]
@@ -186,6 +230,10 @@ class WorkforceOrchestratorAgent(BaseAgent):
                     description=research_worker.get_description(),
                     worker=research_worker.agent,
                 )
+                added_count += 1
+                log.debug(f"Added Market Research worker to workforce: {research_worker.get_description()}")
+            else:
+                log.warning("Market Research worker agent is None, skipping")
             
             # Add Trade Execution worker
             execution_worker = self.workers["execution"]
@@ -194,8 +242,12 @@ class WorkforceOrchestratorAgent(BaseAgent):
                     description=execution_worker.get_description(),
                     worker=execution_worker.agent,
                 )
+                added_count += 1
+                log.debug(f"Added Trade Execution worker to workforce: {execution_worker.get_description()}")
+            else:
+                log.warning("Trade Execution worker agent is None, skipping")
             
-            log.info("Added all workers to workforce")
+            log.info(f"Successfully added {added_count}/{len(self.workers)} workers to workforce")
             
         except Exception as e:
             log.error(f"Failed to add workers to workforce: {e}")

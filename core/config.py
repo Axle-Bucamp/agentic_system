@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     mcp_api_key: Optional[str] = Field(default="mock_api_key", env="MCP_API_KEY")
     dex_simulator_url: str = Field(default="http://localhost:8001", env="DEX_SIMULATOR_URL")
     
+    # Blockscout MCP Configuration
+    blockscout_mcp_url: Optional[str] = Field(
+        default="http://blockscout-mcp:8080",
+        env="BLOCKSCOUT_MCP_URL"
+    )
+    
     # Mock services
     use_mock_services: bool = Field(default=True, env="USE_MOCK_SERVICES")
     
@@ -64,7 +70,12 @@ class Settings(BaseSettings):
     memory_chat_history_limit: int = Field(default=100, env="MEMORY_CHAT_HISTORY_LIMIT")
     memory_retrieve_limit: int = Field(default=3, env="MEMORY_RETRIEVE_LIMIT")
     memory_token_limit: int = Field(default=4096, env="MEMORY_TOKEN_LIMIT")
-    memory_embedding_model: str = Field(default="text-embedding-3-small", env="MEMORY_EMBEDDING_MODEL")
+    memory_embedding_model: str = Field(default="nomic-embed-text", env="MEMORY_EMBEDDING_MODEL")
+    memory_embedding_provider: str = Field(default="ollama", env="MEMORY_EMBEDDING_PROVIDER")  # "ollama" or "openai"
+    
+    # Ollama Configuration
+    ollama_url: str = Field(default="http://ollama:11434", env="OLLAMA_URL")
+    ollama_model: str = Field(default="nomic-embed-text", env="OLLAMA_MODEL")
     
     # Blockchain RPC URLs
     bsc_rpc_url: str = Field(default="https://bsc-dataseed.binance.org/", env="BSC_RPC_URL")

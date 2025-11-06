@@ -21,6 +21,10 @@ class ExchangeManager:
         self.trading_enabled = True
         self.paper_trading = False
     
+    async def initialize(self) -> None:
+        """Initialize the exchange manager (connects to all exchanges)."""
+        await self.connect_all()
+    
     def add_exchange(self, exchange: ExchangeInterface, is_primary: bool = False) -> None:
         """Add an exchange to the manager."""
         self.exchanges[exchange.exchange_type] = exchange
