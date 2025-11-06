@@ -47,6 +47,11 @@ dependencies = [
     "loguru>=0.7.0",
     "autogen-agentchat>=0.2.0",
     "langchain-community>=0.0.10",
+    # CAMEL-AI Framework
+    "camel-ai>=0.1.0",
+    # Vector Database and Embeddings
+    "qdrant-client>=1.7.0",
+    "sentence-transformers>=2.2.0",
     "llm-guard>=0.3.0",
     # "agentic-radar>=0.14.0",  # Not available on PyPI
     # "garak>=2.0.0",  # Version conflict
@@ -167,6 +172,9 @@ module = [
     "agentic_radar.*",
     "garak.*",
     "rebuff.*",
+    "camel.*",
+    "qdrant_client.*",
+    "sentence_transformers.*",
 ]
 ignore_missing_imports = true
 

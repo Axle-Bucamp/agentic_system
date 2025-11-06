@@ -1,0 +1,18 @@
+Quick Start
+Authentication
+Use your API key in the X-API-Key header for authenticated requests.
+
+curl -H "X-API-Key: your-api-key" https://api.example.com/endpoint
+Base URL
+All API endpoints are relative to the base URL.
+
+https://forecasting.guidry-cloud.com/api/
+
+
+--------------------------------
+
+test : read_only api : sk_u2o0Lf_1opzLgtbcwA0xIpmma3ffz2R7Po1FoWt_wuA
+
+test : admin api : sk_sDnRH93ui9km3wdCMYSQ5mTpdzACbVBvqs5rcPuCfgw
+
+gemini api : AIzaSyBQ2nbaRCp7rKjI-t_L6qsKjmBD8mdheMo

@@ -493,6 +493,61 @@ async def update_user_preferences(
     return {"status": "success", "message": "Preferences updated successfully"}
 
 
+# Market order endpoint for UI
+@app.post("/api/trades/market")
+@rate_limit(max_requests=20, window_seconds=60)
+async def create_market_order(
+    order_data: Dict[str, Any],
+    user: Optional[Dict] = Depends(get_current_user)
+):
+    """
+    Create a market order (fake trading mode).
+    
+    Body:
+        - ticker: str (e.g., "BTC")
+        - side: str ("BUY" or "SELL")
+        - quantity: float (amount in USDC for BUY, asset units for SELL)
+    """
+    try:
+        ticker = order_data.get("ticker", "").upper()
+        side = order_data.get("side", "BUY").upper()
+        quantity = float(order_data.get("quantity", 0))
+        
+        if not ticker or quantity <= 0:
+            raise HTTPException(status_code=400, detail="Invalid order parameters")
+        
+        if side not in ["BUY", "SELL"]:
+            raise HTTPException(status_code=400, detail="Side must be BUY or SELL")
+        
+        # Use DEX simulator client for fake trading
+        from core.dex_simulator_client import dex_simulator_client
+        await dex_simulator_client.connect()
+        
+        if side == "BUY":
+            result = await dex_simulator_client.buy_asset(ticker, quantity)
+        else:
+            result = await dex_simulator_client.sell_asset(ticker, quantity)
+        
+        await dex_simulator_client.disconnect()
+        
+        if result.get("success"):
+            return {
+                "status": "success",
+                "order": {
+                    "ticker": ticker,
+                    "side": side,
+                    "quantity": quantity,
+                    "executed_at": datetime.utcnow().isoformat(),
+                    **result
+                }
+            }
+        else:
+            raise HTTPException(status_code=400, detail=result.get("error", "Order failed"))
+            
+    except Exception as e:
+        log.error(f"Error creating market order: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create order: {str(e)}")
+
 # Legacy endpoints (for backward compatibility)
 @app.get("/api/portfolio", response_model=Portfolio)
 @rate_limit(max_requests=50, window_seconds=60)

@@ -58,6 +58,25 @@ def setup_logging():
     )
     
     logger.info(f"Logging initialized - Level: {settings.log_level}, File: {settings.log_file}")
+    
+    # Bridge standard logging to loguru for third-party modules
+    try:
+        import logging
+        class LoguruHandler(logging.Handler):
+            def emit(self, record):
+                try:
+                    level = logger.level(record.levelname).name
+                except Exception:
+                    level = record.levelno
+                logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+        root_logger = logging.getLogger()
+        root_logger.handlers = []
+        root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(LoguruHandler())
+    except Exception:
+        # If bridging fails, continue with loguru only
+        pass
     return logger
 
 

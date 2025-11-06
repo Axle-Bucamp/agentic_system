@@ -46,7 +46,25 @@ class Settings(BaseSettings):
     
     # LLM Configuration
     openai_api_key: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
+    gemini_api_key: Optional[str] = Field(default=None, env="GEMINI_API_KEY")
     vllm_endpoint: Optional[str] = Field(default="http://localhost:8002/v1", env="VLLM_ENDPOINT")
+    
+    # CAMEL Configuration (default to stable Gemini 1.5 Pro for best compatibility)
+    camel_default_model: str = Field(default="gemini-1.5-pro", env="CAMEL_DEFAULT_MODEL")
+    camel_coordinator_model: str = Field(default="gemini-1.5-pro", env="CAMEL_COORDINATOR_MODEL")
+    camel_task_model: str = Field(default="gemini-1.5-pro", env="CAMEL_TASK_MODEL")
+    camel_worker_model: str = Field(default="gemini-1.5-pro", env="CAMEL_WORKER_MODEL")
+    
+    # Qdrant Configuration
+    qdrant_host: str = Field(default="localhost", env="QDRANT_HOST")
+    qdrant_port: int = Field(default=6333, env="QDRANT_PORT")
+    qdrant_collection_name: str = Field(default="trading_memory", env="QDRANT_COLLECTION_NAME")
+    
+    # Memory Configuration
+    memory_chat_history_limit: int = Field(default=100, env="MEMORY_CHAT_HISTORY_LIMIT")
+    memory_retrieve_limit: int = Field(default=3, env="MEMORY_RETRIEVE_LIMIT")
+    memory_token_limit: int = Field(default=4096, env="MEMORY_TOKEN_LIMIT")
+    memory_embedding_model: str = Field(default="text-embedding-3-small", env="MEMORY_EMBEDDING_MODEL")
     
     # Blockchain RPC URLs
     bsc_rpc_url: str = Field(default="https://bsc-dataseed.binance.org/", env="BSC_RPC_URL")
@@ -95,6 +113,11 @@ class Settings(BaseSettings):
     def redis_url(self) -> str:
         """Construct Redis URL."""
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+    
+    @property
+    def qdrant_url(self) -> str:
+        """Construct Qdrant URL."""
+        return f"http://{self.qdrant_host}:{self.qdrant_port}"
     
     def get_asset_tier(self, asset: str) -> int:
         """Get the risk tier for an asset."""

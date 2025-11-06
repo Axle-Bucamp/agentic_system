@@ -13,6 +13,7 @@ from agents.risk_agent import RiskAgent
 from agents.news_agent import NewsAgent
 from agents.copytrade_agent import CopyTradeAgent
 from agents.orchestrator import OrchestratorAgent
+from agents.workforce_orchestrator import WorkforceOrchestratorAgent
 
 
 async def main():
@@ -36,7 +37,9 @@ async def main():
         "risk": RiskAgent,
         "news": NewsAgent,
         "copytrade": CopyTradeAgent,
-        "orchestrator": OrchestratorAgent
+        "orchestrator": OrchestratorAgent,
+        "workforce": WorkforceOrchestratorAgent,
+        "workforce_orchestrator": WorkforceOrchestratorAgent,
     }
     
     agent_class = agent_map.get(agent_name)
