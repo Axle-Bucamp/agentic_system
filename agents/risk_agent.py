@@ -2,7 +2,7 @@
 Risk Analysis Agent - Evaluates and manages trading risks.
 """
 import numpy as np
-from typing import Optional, Dict, List
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from core.models import (
     AgentType, AgentMessage, MessageType, RiskMetrics,
@@ -11,6 +11,7 @@ from core.models import (
 from core.config import settings
 from core.logging import log
 from agents.base_agent import BaseAgent
+from core import asset_registry
 
 
 class RiskAgent(BaseAgent):
@@ -53,15 +54,14 @@ class RiskAgent(BaseAgent):
                     await self._send_risk_alert(risk_metrics)
             
             # Calculate per-asset risk metrics
-            for ticker in settings.supported_assets:
+            for ticker in asset_registry.get_assets():
                 await self._calculate_asset_risk(ticker)
                 
         except Exception as e:
             log.error(f"Risk Agent cycle error: {e}")
     
     def get_cycle_interval(self) -> int:
-        """Run every 2 minutes."""
-        return 120
+        return settings.get_agent_cycle_seconds(self.agent_type)
     
     async def _evaluate_signal_risk(self, signal_data: Dict):
         """Evaluate risk for a trading signal."""
@@ -147,6 +147,7 @@ class RiskAgent(BaseAgent):
                 if risk_level == "LOW":
                     risk_level = "MEDIUM"
         
+        risk_score = self._map_risk_level_to_score(risk_level)
         return RiskMetrics(
             ticker=None,
             current_drawdown=current_drawdown,
@@ -154,6 +155,8 @@ class RiskAgent(BaseAgent):
             daily_pnl=daily_pnl,
             risk_level=risk_level,
             warnings=warnings,
+            risk_score=risk_score,
+            risk_metric=round(risk_score * 100, 2),
             timestamp=datetime.utcnow()
         )
     
@@ -212,12 +215,18 @@ class RiskAgent(BaseAgent):
                     warnings.append(f"RSI {rsi:.1f} indicates oversold - risky to SELL")
                     risk_level = "HIGH"
         
+        risk_score = self._map_risk_level_to_score(risk_level)
+        stop_loss_upper, stop_loss_lower = self._calculate_stop_loss_window(risk_score, tier)
         return RiskMetrics(
             ticker=ticker,
             position_size=current_position_pct,
             max_position_size=max_position_pct,
             risk_level=risk_level,
             warnings=warnings,
+            risk_score=risk_score,
+            risk_metric=round(risk_score * 100, 2),
+            stop_loss_upper=stop_loss_upper,
+            stop_loss_lower=stop_loss_lower,
             timestamp=datetime.utcnow()
         )
     
@@ -284,6 +293,21 @@ class RiskAgent(BaseAgent):
             reasoning += f" Current position: {risk_metrics.position_size:.1%} of portfolio."
         
         return reasoning
+
+    def _map_risk_level_to_score(self, risk_level: str) -> float:
+        mapping = {
+            "LOW": 0.1,
+            "MEDIUM": 0.35,
+            "HIGH": 0.65,
+            "CRITICAL": 0.9,
+        }
+        return mapping.get(risk_level.upper(), 0.35)
+
+    def _calculate_stop_loss_window(self, risk_score: float, tier: int) -> Tuple[float, float]:
+        tier_modifier = 0.02 if tier >= 3 else 0.0
+        upside = 0.01 + (1 - risk_score) * 0.02 - tier_modifier
+        downside = -0.02 - risk_score * 0.05 - tier_modifier
+        return upside, downside
     
     async def validate_trade_decision(self, decision: TradeDecision) -> Dict:
         """Validate a trade decision against risk constraints."""

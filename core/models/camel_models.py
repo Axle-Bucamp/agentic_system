@@ -94,6 +94,14 @@ class CamelModelFactory:
         if not api_key:
             raise ValueError(f"No API key provided for model {model_name}")
         
+        def _build_model(selected_model_type: ModelType, selected_platform: ModelPlatformType, selected_key: str):
+            return ModelFactory.create(
+                model_platform=selected_platform,
+                model_type=selected_model_type,
+                api_key=selected_key,
+                model_config_dict=kwargs if kwargs else None,
+            )
+
         try:
             # Determine model platform based on model type
             if "gemini" in model_name.lower():
@@ -106,43 +114,39 @@ class CamelModelFactory:
                 # Default to OpenAI platform
                 model_platform = ModelPlatformType.OPENAI
                 model_config = kwargs if kwargs else None
-            
-            model = ModelFactory.create(
-                model_platform=model_platform,
-                model_type=model_type,
-                api_key=api_key,
-                model_config_dict=model_config
-            )
-            
-            # Cache the model
+
+            model = _build_model(model_type, model_platform, api_key)
+
             cls._model_cache[cache_key] = model
             log.info(f"Created CAMEL model: {model_name}")
-            
             return model
-            
+
         except Exception as e:
             error_msg = str(e)
-            # If Gemini model fails, fall back to OpenAI
-            if "gemini" in model_name.lower() and error_msg in ["GEMINI_PRO", "GEMINI_PRO_VISION"]:
-                log.warning(f"Gemini model creation failed ({error_msg}), falling back to OpenAI")
-                # Fallback to OpenAI
-                model_type = ModelType.GPT_4O_MINI
-                api_key = settings.openai_api_key
-                if api_key:
-                    try:
-                        model = ModelFactory.create(
-                            model_platform=ModelPlatformType.OPENAI,
-                            model_type=model_type,
-                            api_key=api_key,
-                            model_config_dict=kwargs if kwargs else None
-                        )
-                        log.info(f"Using fallback OpenAI model: {model_type}")
-                        cls._model_cache[cache_key] = model
-                        return model
-                    except Exception as fallback_error:
-                        log.error(f"Fallback model creation also failed: {fallback_error}")
-            
             log.error(f"Failed to create model {model_name}: {error_msg}")
+
+            # Attempt graceful fallback for Gemini or other remote providers
+            if "gemini" in model_name.lower():
+                fallback_key = settings.openai_api_key
+                if fallback_key:
+                    try:
+                        fallback_model = _build_model(
+                            ModelType.GPT_4O_MINI,
+                            ModelPlatformType.OPENAI,
+                            fallback_key,
+                        )
+                        fallback_cache_key = f"fallback_{cache_key}"
+                        cls._model_cache[fallback_cache_key] = fallback_model
+                        log.warning(
+                            "Gemini model '%s' unavailable (%s); using OpenAI fallback '%s'",
+                            model_name,
+                            error_msg,
+                            ModelType.GPT_4O_MINI.value if hasattr(ModelType.GPT_4O_MINI, "value") else "gpt-4o-mini",
+                        )
+                        return fallback_model
+                    except Exception as fallback_error:
+                        log.error("Fallback OpenAI model creation failed: %s", fallback_error)
+
             raise
     
     @classmethod

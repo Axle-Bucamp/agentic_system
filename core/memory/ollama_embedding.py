@@ -4,6 +4,7 @@ Ollama Embedding Client for lightweight embeddings.
 Uses Ollama API to generate embeddings without requiring PyTorch or large models.
 """
 from typing import List, Optional
+import asyncio
 import httpx
 from core.config import settings
 from core.logging import log
@@ -13,9 +14,10 @@ try:
     EMBEDDING_BASE_AVAILABLE = True
 except ImportError:
     EMBEDDING_BASE_AVAILABLE = False
-    # Create a minimal BaseEmbedding interface if CAMEL is not available
+
     class BaseEmbedding:
         """Minimal BaseEmbedding interface."""
+
         pass
 
 
@@ -37,22 +39,22 @@ class OllamaEmbedding(BaseEmbedding):
             timeout: Request timeout in seconds
         """
         self.model = model
-        self.base_url = (base_url or settings.ollama_url).rstrip('/')
+        self.base_url = (base_url or settings.ollama_url).rstrip("/")
         self.timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: Optional[httpx.Client] = None
         log.info(f"Initialized OllamaEmbedding with model: {model}, URL: {self.base_url}")
     
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create async HTTP client."""
+    def _get_client(self) -> httpx.Client:
+        """Get or create synchronous HTTP client."""
         if self._client is None:
-            self._client = httpx.AsyncClient(
+            self._client = httpx.Client(
                 base_url=self.base_url,
                 timeout=self.timeout,
-                follow_redirects=True
+                follow_redirects=True,
             )
         return self._client
     
-    async def embed(self, text: str) -> List[float]:
+    def embed(self, text: str) -> List[float]:
         """
         Generate embedding for a single text.
         
@@ -62,15 +64,15 @@ class OllamaEmbedding(BaseEmbedding):
         Returns:
             List of floats representing the embedding vector
         """
-        client = await self._get_client()
-        
+        client = self._get_client()
+
         try:
-            response = await client.post(
+            response = client.post(
                 "/api/embeddings",
                 json={
                     "model": self.model,
-                    "prompt": text
-                }
+                    "prompt": text,
+                },
             )
             response.raise_for_status()
             data = response.json()
@@ -89,7 +91,12 @@ class OllamaEmbedding(BaseEmbedding):
             log.error(f"Error generating embedding: {e}")
             raise
     
-    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+    async def embed_async(self, text: str) -> List[float]:
+        """Async wrapper around the synchronous embed for compatibility."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.embed, text)
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """
         Generate embeddings for multiple texts.
         
@@ -99,14 +106,15 @@ class OllamaEmbedding(BaseEmbedding):
         Returns:
             List of embedding vectors
         """
-        # Ollama doesn't support batch embeddings natively, so we use asyncio.gather
-        # for parallel requests (Ollama can handle multiple concurrent requests)
-        import asyncio
-        tasks = [self.embed(text) for text in texts]
-        embeddings = await asyncio.gather(*tasks)
-        return list(embeddings)
+        return [self.embed(text) for text in texts]
     
-    async def embed_list(self, texts: List[str]) -> List[List[float]]:
+    async def embed_batch_async(self, texts: List[str]) -> List[List[float]]:
+        """Async wrapper to generate embeddings concurrently when needed."""
+        loop = asyncio.get_running_loop()
+        tasks = [loop.run_in_executor(None, self.embed, text) for text in texts]
+        return await asyncio.gather(*tasks)
+
+    def embed_list(self, texts: List[str]) -> List[List[float]]:
         """
         Generate embeddings for a list of texts (alias for embed_batch).
         
@@ -118,7 +126,7 @@ class OllamaEmbedding(BaseEmbedding):
         Returns:
             List of embedding vectors
         """
-        return await self.embed_batch(texts)
+        return self.embed_batch(texts)
     
     def get_output_dim(self) -> int:
         """
@@ -137,23 +145,21 @@ class OllamaEmbedding(BaseEmbedding):
         }
         return dim_map.get(self.model, 768)  # Default to 768
     
-    async def close(self):
-        """Close the HTTP client."""
+    async def close(self):  # pragma: no cover - async cleanup helper
+        """Close the HTTP client asynchronously."""
         if self._client is not None:
-            await self._client.aclose()
+            await asyncio.get_running_loop().run_in_executor(None, self._client.close)
             self._client = None
     
     def __del__(self):
         """Cleanup on deletion."""
-        # Note: This won't work for async cleanup, but it's a fallback
         if self._client is not None:
             try:
-                import asyncio
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    loop.create_task(self._client.aclose())
+                    loop.create_task(loop.run_in_executor(None, self._client.close))
                 else:
-                    loop.run_until_complete(self._client.aclose())
+                    self._client.close()
             except Exception:
                 pass
 

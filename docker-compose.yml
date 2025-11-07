@@ -476,11 +476,10 @@ services:
 
   # Minimal UI served by nginx, proxies API routes to trading-api
   ui:
-    image: nginx:alpine
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
     container_name: ats-ui
-    volumes:
-      - ./ui:/usr/share/nginx/html:ro
-      - ./ui/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "5173:80"
     depends_on:

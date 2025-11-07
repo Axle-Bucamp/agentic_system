@@ -2,8 +2,10 @@
 Agent runner - Starts the appropriate agent based on environment variable.
 """
 import asyncio
-import signal
 import os
+import signal
+
+from core.config import settings
 from core.redis_client import RedisClient
 from core.logging import log
 from agents.memory_agent import MemoryAgent
@@ -24,7 +26,11 @@ async def main():
         log.error("AGENT_NAME environment variable not set")
         return
     
-    log.info(f"Starting {agent_name} agent...")
+    log.info(
+        "Starting {} agent using schedule profile '{}'",
+        agent_name,
+        settings.agent_schedule_profile,
+    )
     
     # Create Redis client
     redis_client = RedisClient()
@@ -49,6 +55,17 @@ async def main():
         return
     
     agent = agent_class(redis_client)
+
+    # Surface effective cadence so operators can confirm runtime ordering
+    try:
+        cycle_seconds = settings.get_agent_cycle_seconds(agent.agent_type)
+        log.info(
+            "Effective cycle interval for {} agent: {}s (env override honoured where set)",
+            agent_name,
+            cycle_seconds,
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging only
+        log.warning("Unable to resolve cycle interval for {} agent: {}", agent_name, exc)
     
     # Setup signal handlers for graceful shutdown
     def signal_handler(sig, frame):

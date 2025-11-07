@@ -3,7 +3,8 @@ Data models for the Agentic Trading System.
 """
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -106,6 +107,10 @@ class RiskMetrics(BaseModel):
     daily_pnl: Optional[float] = None
     risk_level: str  # LOW, MEDIUM, HIGH, CRITICAL
     warnings: List[str] = []
+    risk_score: Optional[float] = None
+    risk_metric: Optional[float] = None
+    stop_loss_upper: Optional[float] = None
+    stop_loss_lower: Optional[float] = None
     timestamp: datetime
 
 
@@ -223,4 +228,53 @@ class HumanValidationResponse(BaseModel):
     approved: bool
     feedback: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TradeMemoryEntry(BaseModel):
+    """FIFO trade tape entry stored by the memory agent."""
+    trade_id: str
+    ticker: str
+    action: TradeAction
+    quantity: float
+    price: float
+    pnl: Optional[float] = None
+    status: Optional[str] = None  # WIN / LOSS / BREAKEVEN / UNKNOWN
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class NewsMemoryEntry(BaseModel):
+    """Recency-weighted news sentiment memory entry."""
+    news_id: str
+    ticker: Optional[str] = None
+    sentiment_score: float
+    confidence: float
+    summary: str
+    sources: List[str]
+    weight: float
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GraphMemoryNode(BaseModel):
+    """Node within the long-term knowledge graph."""
+    node_id: str
+    label: str
+    node_type: str
+    weight: float = 1.0
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class GraphMemoryEdge(BaseModel):
+    """Relationship edge within the long-term knowledge graph."""
+    edge_id: str
+    source: str
+    target: str
+    relation: str
+    weight: float = 1.0
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 

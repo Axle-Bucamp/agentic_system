@@ -12,6 +12,7 @@ from core.config import settings
 from core.logging import log
 from core.forecasting_client import ForecastingClient, ForecastingAPIError
 from agents.base_agent import BaseAgent
+from core import asset_registry
 
 
 class DQNAgent(BaseAgent):
@@ -20,6 +21,7 @@ class DQNAgent(BaseAgent):
     def __init__(self, redis_client):
         super().__init__(AgentType.DQN, redis_client)
         self.forecasting_client: Optional[ForecastingClient] = None
+        self._supported_assets: List[str] = list(settings.supported_assets)
         
     async def initialize(self):
         """Initialize Forecasting API client."""
@@ -32,6 +34,8 @@ class DQNAgent(BaseAgent):
         self.forecasting_client = ForecastingClient(config)
         await self.forecasting_client.connect()
         log.info("DQN Agent initialized with Forecasting API connection")
+
+        await self._refresh_supported_assets()
     
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         """Process incoming messages."""
@@ -47,19 +51,22 @@ class DQNAgent(BaseAgent):
         """Run periodic analysis on all supported assets."""
         log.debug("DQN Agent running cycle...")
         
-        for ticker in settings.supported_assets:
+        for ticker in asset_registry.get_assets():
             try:
                 await self._analyze_ticker(ticker)
             except Exception as e:
                 log.error(f"DQN Agent error analyzing {ticker}: {e}")
     
     def get_cycle_interval(self) -> int:
-        """Run every 5 minutes."""
-        return 300
+        return settings.get_agent_cycle_seconds(self.agent_type)
     
     async def _analyze_ticker(self, ticker: str):
         """Analyze a ticker using MCP API predictions."""
         try:
+            if ticker not in asset_registry.get_assets():
+                log.debug("Skipping unsupported ticker %s", ticker)
+                return
+
             # Get predictions for multiple intervals
             predictions = await self._get_multi_interval_predictions(ticker)
             
@@ -89,9 +96,11 @@ class DQNAgent(BaseAgent):
             await self.send_signal(signal.dict())
             
             # Cache prediction
+            cached_signal = signal.dict()
+            cached_signal["generated_at"] = datetime.utcnow().isoformat()
             await self.redis.set_json(
                 f"dqn:prediction:{ticker}",
-                signal.dict(),
+                cached_signal,
                 expire=300  # 5 minutes
             )
             
@@ -102,8 +111,10 @@ class DQNAgent(BaseAgent):
         """Get predictions for multiple time intervals."""
         predictions = []
         
-        # Analyze hours and days intervals (skip minutes as per requirements)
-        intervals = ["hours", "days"]
+        # Prefer the intervals advertised by the Forecasting API, fallback to hours/days
+        intervals = [interval for interval in asset_registry.get_intervals(ticker) if interval in {"hours", "days"}]
+        if not intervals:
+            intervals = ["hours", "days"]
         
         for interval in intervals:
             try:
@@ -122,8 +133,7 @@ class DQNAgent(BaseAgent):
                 log.error("Forecasting client not initialized")
                 return None
             
-            # Convert ticker format (BTC -> BTC-USD)
-            api_ticker = f"{ticker}-USD" if not ticker.endswith("-USD") else ticker
+            api_ticker = asset_registry.get_symbol(ticker)
             
             data = await self.forecasting_client.get_action_recommendation(api_ticker, interval)
             
@@ -164,7 +174,7 @@ class DQNAgent(BaseAgent):
                 return None
             
             # Convert ticker format (BTC -> BTC-USD)
-            api_ticker = f"{ticker}-USD" if not ticker.endswith("-USD") else ticker
+            api_ticker = asset_registry.get_symbol(ticker)
             
             return await self.forecasting_client.get_stock_forecast(api_ticker, interval)
         except Exception as e:
@@ -239,4 +249,20 @@ class DQNAgent(BaseAgent):
         except Exception as e:
             log.error(f"Error getting available tickers: {e}")
             return []
+
+    async def _refresh_supported_assets(self) -> None:
+        """Fetch available assets from the Forecasting API and update the shared registry."""
+        if not self.forecasting_client:
+            return
+
+        try:
+            available = await self.forecasting_client.get_available_tickers()
+            enabled = await self.forecasting_client.get_enabled_assets()
+            await asset_registry.update_assets(available, enabled)
+            self._supported_assets = asset_registry.get_assets()
+            log.info("DQN Agent using %d dynamically enabled assets", len(self._supported_assets))
+        except Exception as exc:
+            log.warning("Unable to refresh asset catalogue, falling back to static list: %s", exc)
+            await asset_registry.use_fallback_assets()
+            self._supported_assets = asset_registry.get_assets()
 

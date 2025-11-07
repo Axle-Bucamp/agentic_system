@@ -171,13 +171,39 @@ class ForecastingClient:
         else:
             try:
                 response = await self._make_request("GET", "/api/tickers/available")
-                result = response.get("tickers", [])
+                if isinstance(response, list):
+                    result = response
+                else:
+                    result = response.get("tickers", [])
             except Exception as e:
                 log.error(f"Failed to get available tickers: {e}")
                 return []
         
         self._set_cache(cache_key, result)
         return result
+
+    async def get_enabled_assets(self) -> List[str]:
+        """Retrieve the list of assets currently enabled for trading."""
+        cache_key = "enabled_assets"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        if self.is_mock:
+            assets = [ticker.replace("-USD", "") for ticker in self.mock_data.get("tickers", [])]
+        else:
+            try:
+                response = await self._make_request("GET", "/attribute/enabled-assets")
+                if isinstance(response, dict):
+                    assets = response.get("assets", [])
+                else:
+                    assets = response
+            except Exception as e:
+                log.error(f"Failed to fetch enabled assets: {e}")
+                return []
+
+        self._set_cache(cache_key, assets, timedelta(minutes=10))
+        return assets
     
     async def get_ticker_info(self, ticker: str) -> Dict[str, Any]:
         """Get detailed information about a specific ticker."""

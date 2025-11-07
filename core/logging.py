@@ -51,7 +51,19 @@ def setup_logging():
         str(trading_log_path),
         format="{time:YYYY-MM-DD HH:mm:ss} | {message}",
         level="INFO",
-        filter=lambda record: "TRADE_DECISION" in record["extra"],
+        filter=lambda record: record["extra"].get("TRADE_DECISION"),
+        rotation="50 MB",
+        retention="365 days",
+        compression="zip",
+    )
+
+    # File for orchestrator portfolio plans
+    portfolio_log_path = log_path.parent / "portfolio_plans.log"
+    logger.add(
+        str(portfolio_log_path),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {message}",
+        level="INFO",
+        filter=lambda record: record["extra"].get("PORTFOLIO_PLAN"),
         rotation="50 MB",
         retention="365 days",
         compression="zip",

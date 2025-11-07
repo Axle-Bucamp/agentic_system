@@ -1,9 +1,15 @@
 """
 Configuration management for the Agentic Trading System.
 """
-from typing import List, Optional
-from pydantic import Field, ConfigDict
+from __future__ import annotations
+
+import os
+from typing import Dict, List, Optional, Union, TYPE_CHECKING
+from pydantic import Field, ConfigDict, model_validator
 from pydantic_settings import BaseSettings
+
+if TYPE_CHECKING:
+    from core.models import AgentType
 
 
 class Settings(BaseSettings):
@@ -110,10 +116,85 @@ class Settings(BaseSettings):
     # Agent Configuration
     agent_heartbeat_interval: int = 30  # seconds
     agent_timeout: int = 300  # seconds
+    agent_schedule_profile: str = Field(default="minutes", env="AGENT_SCHEDULE_PROFILE")
+    agent_schedule_profiles: Dict[str, Dict[str, int]] = Field(
+        default_factory=lambda: {
+            "minutes": {
+                "memory": 600,
+                "dqn": 300,
+                "chart": 300,
+                "risk": 120,
+                "news": 900,
+                "copytrade": 180,
+                "orchestrator": 300,
+                "workforce": 300,
+            },
+            "hours": {
+                "memory": 3600,
+                "dqn": 1800,
+                "chart": 1800,
+                "risk": 1200,
+                "news": 3600,
+                "copytrade": 900,
+                "orchestrator": 1800,
+                "workforce": 1800,
+            },
+            "days": {
+                "memory": 21600,
+                "dqn": 14400,
+                "chart": 10800,
+                "risk": 7200,
+                "news": 43200,
+                "copytrade": 3600,
+                "orchestrator": 14400,
+                "workforce": 14400,
+            },
+        }
+    )
+    agent_cycle_overrides: Dict[str, int] = Field(default_factory=dict, env="AGENT_CYCLE_OVERRIDES")
+    default_agent_cycle_seconds: int = Field(default=300, env="DEFAULT_AGENT_CYCLE_SECONDS")
     
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     log_file: str = Field(default="/app/logs/trading_system.log", env="LOG_FILE")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_blank_env_entries(cls, data: Dict[str, object]):
+        """Ensure empty-string env overrides do not clobber numeric/string defaults."""
+        if not isinstance(data, dict):
+            return data
+
+        numeric_fields = {
+            "qdrant_port",
+            "memory_retrieve_limit",
+            "memory_token_limit",
+            "redis_port",
+            "postgres_port",
+            "redis_db",
+            "agent_heartbeat_interval",
+            "agent_timeout",
+            "default_agent_cycle_seconds",
+        }
+
+        string_fields = {
+            "qdrant_host",
+            "ollama_url",
+            "mcp_api_url",
+            "dex_simulator_url",
+        }
+
+        for field_name in numeric_fields:
+            value = data.get(field_name)
+            if isinstance(value, str) and not value.strip():
+                data.pop(field_name, None)
+
+        for field_name in string_fields:
+            value = data.get(field_name)
+            if isinstance(value, str) and not value.strip():
+                data.pop(field_name, None)
+
+        return data
     
     @property
     def database_url(self) -> str:
@@ -153,6 +234,38 @@ class Settings(BaseSettings):
             return self.max_position_size * 0.5  # 10% for tier 3
         else:  # tier 4
             return self.max_position_size * 0.25  # 5% for tier 4 (meme coins)
+
+    def get_agent_cycle_seconds(self, agent: Union[str, "AgentType"]) -> int:
+        """Resolve the cycle interval (seconds) for an agent based on configured profiles and overrides."""
+        try:
+            # Lazy import to avoid circular dependency during settings initialization
+            from core.models import AgentType  # pylint: disable=import-outside-toplevel
+        except Exception:  # pragma: no cover - fallback if models not ready
+            AgentType = None  # type: ignore
+
+        if AgentType is not None and isinstance(agent, AgentType):
+            agent_key = agent.value.lower()
+        else:
+            agent_key = str(agent).lower()
+
+        # Explicit env override takes precedence (e.g., AGENT_CYCLE_DQN=120)
+        env_override = os.getenv(f"AGENT_CYCLE_{agent_key.upper()}")
+        if env_override:
+            try:
+                return int(env_override)
+            except ValueError:
+                pass
+
+        # JSON overrides via settings field
+        if agent_key in self.agent_cycle_overrides:
+            return int(self.agent_cycle_overrides[agent_key])
+
+        # Profile-based defaults
+        profile = self.agent_schedule_profiles.get(self.agent_schedule_profile, {})
+        if agent_key in profile:
+            return profile[agent_key]
+
+        return self.default_agent_cycle_seconds
     
 
 

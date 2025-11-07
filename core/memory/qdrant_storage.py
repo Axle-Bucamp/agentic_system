@@ -30,16 +30,38 @@ class QdrantStorageFactory:
             raise ImportError("Qdrant dependencies not installed")
         
         if cls._client is None:
-            try:
-                cls._client = QdrantClient(
-                    host=settings.qdrant_host,
-                    port=settings.qdrant_port,
-                    timeout=30.0
-                )
-                log.info(f"Connected to Qdrant at {settings.qdrant_url}")
-            except Exception as e:
-                log.error(f"Failed to connect to Qdrant: {e}")
-                raise
+            configured_host = (settings.qdrant_host or "").strip()
+            candidate_hosts = []
+
+            if configured_host:
+                candidate_hosts.append(configured_host)
+
+            # Add sensible fallbacks for containerised and local development environments
+            for fallback in ("qdrant", "localhost"):
+                if fallback not in candidate_hosts:
+                    candidate_hosts.append(fallback)
+
+            last_error: Optional[Exception] = None
+            for host in candidate_hosts:
+                try:
+                    client = QdrantClient(
+                        host=host,
+                        port=settings.qdrant_port,
+                        timeout=30.0,
+                    )
+                    # Perform a lightweight request to ensure the connection succeeds
+                    client.get_collections()
+                    cls._client = client
+                    log.info("Connected to Qdrant at http://%s:%s", host, settings.qdrant_port)
+                    break
+                except Exception as exc:  # pragma: no cover - network failures
+                    last_error = exc
+                    log.debug("Attempt to connect to Qdrant at %s:%s failed: %s", host, settings.qdrant_port, exc)
+
+            if cls._client is None:
+                error_message = f"Failed to connect to Qdrant using hosts {candidate_hosts}: {last_error}"
+                log.error(error_message)
+                raise RuntimeError(error_message) from last_error
         
         return cls._client
     

@@ -187,8 +187,7 @@ class BaseAgent(ABC):
     
     def get_cycle_interval(self) -> int:
         """Get interval between agent cycles in seconds."""
-        # Default to 60 seconds, can be overridden by subclasses
-        return 60
+        return settings.get_agent_cycle_seconds(self.agent_type)
     
     async def get_shared_state(self, key: str) -> Optional[Dict]:
         """Get shared state from Redis."""

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
+import inspect
 from datetime import datetime, timedelta
 import time
 import uuid
@@ -42,6 +43,9 @@ rate_limit_storage = {}
 def rate_limit(max_requests: int = 100, window_seconds: int = 60):
     """Rate limiting decorator."""
     def decorator(func):
+        signature = inspect.signature(func)
+        expects_request = "request" in signature.parameters
+
         @wraps(func)
         async def wrapper(request: Request, *args, **kwargs):
             client_ip = request.client.host
@@ -67,7 +71,20 @@ def rate_limit(max_requests: int = 100, window_seconds: int = 60):
             # Add current request
             rate_limit_storage[client_ip].append(current_time)
             
-            return await func(request, *args, **kwargs)
+            if expects_request:
+                return await func(request, *args, **kwargs)
+            return await func(*args, **kwargs)
+        if expects_request:
+            wrapper.__signature__ = signature
+        else:
+            request_param = inspect.Parameter(
+                "request",
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=Request,
+            )
+            wrapper.__signature__ = signature.replace(
+                parameters=(request_param, *signature.parameters.values())
+            )
         return wrapper
     return decorator
 
@@ -502,6 +519,93 @@ async def update_user_preferences(
     await redis_client.set_json("user:preferences", preferences)
     return {"status": "success", "message": "Preferences updated successfully"}
 
+@app.get("/api/ai/decisions")
+@rate_limit(max_requests=50, window_seconds=60)
+async def get_ai_decisions(limit: int = 50):
+    """Get recent AI decisions and task solving logs."""
+    try:
+        # Get all decision keys from Redis
+        keys = await redis_client.redis.keys("ai_decision:*")
+        decisions = []
+        
+        for key in keys[:limit]:
+            decision = await redis_client.get_json(key)
+            if decision:
+                decisions.append(decision)
+        
+        # Sort by timestamp (newest first)
+        decisions.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        
+        return {
+            "decisions": decisions,
+            "count": len(decisions),
+            "total": len(keys)
+        }
+    except Exception as e:
+        log.error(f"Error fetching AI decisions: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch AI decisions: {str(e)}")
+
+@app.get("/api/ai/decisions/{decision_id}")
+@rate_limit(max_requests=50, window_seconds=60)
+async def get_ai_decision(decision_id: str):
+    """Get a specific AI decision by ID."""
+    try:
+        decision = await redis_client.get_json(f"ai_decision:{decision_id}")
+        if not decision:
+            raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found")
+        return decision
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Error fetching AI decision {decision_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch AI decision: {str(e)}")
+
+@app.post("/api/ai/analyze")
+@rate_limit(max_requests=10, window_seconds=60)
+async def trigger_ai_analysis(
+    request_data: Dict[str, Any],
+    user: Optional[Dict] = Depends(get_current_user)
+):
+    """Trigger AI analysis for a ticker based on user preferences."""
+    try:
+        ticker = request_data.get("ticker", "").upper()
+        if not ticker:
+            raise HTTPException(status_code=400, detail="Ticker is required")
+        
+        # Get user preferences
+        preferences = await redis_client.get_json("user:preferences") or {}
+        
+        # Create a signal message for the workforce orchestrator
+        from core.models import AgentMessage, MessageType
+        from agents.workforce_orchestrator import WorkforceOrchestratorAgent
+        
+        # Get orchestrator instance (this would need to be injected or retrieved)
+        # For now, we'll create a message and publish it to Redis
+        signal_message = {
+            "ticker": ticker,
+            "action": request_data.get("action", "ANALYZE"),
+            "preferences": preferences,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Publish to Redis for orchestrator to pick up
+        await redis_client.redis.publish(
+            "agent_messages",
+            json.dumps({
+                "message_type": MessageType.SIGNAL_GENERATED.value,
+                "payload": signal_message
+            })
+        )
+        
+        return {
+            "status": "success",
+            "message": f"AI analysis triggered for {ticker}",
+            "ticker": ticker
+        }
+    except Exception as e:
+        log.error(f"Error triggering AI analysis: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to trigger AI analysis: {str(e)}")
+
 
 # Market order endpoint for UI
 @app.post("/api/trades/market")
@@ -569,6 +673,100 @@ async def get_portfolio_legacy():
         raise HTTPException(status_code=404, detail="Portfolio not found")
     
     return Portfolio(**portfolio_data)
+
+
+@app.get("/api/orchestrator/wallet-plan")
+@rate_limit(max_requests=50, window_seconds=60)
+async def get_wallet_plan(request: Request):
+    """Fetch the latest wallet balancing plan and optional summary."""
+    plan = await redis_client.get_json("orchestrator:wallet_plan")
+    summary = await redis_client.get_json("orchestrator:wallet_plan_summary")
+
+    # Return empty payloads instead of 404s to keep the UI happy during cold start
+    return {
+        "plan": plan,
+        "summary": summary,
+    }
+
+
+@app.get("/api/orchestrator/wallet-plan/history")
+@rate_limit(max_requests=50, window_seconds=60)
+async def get_wallet_plan_history(request: Request, limit: int = 10):
+    """Fetch historical wallet plans stored by the orchestrator."""
+    try:
+        if limit <= 0:
+            limit = 1
+        raw_entries = await redis_client.lrange(
+            "orchestrator:wallet_plan_history",
+            0,
+            max(0, limit - 1),
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        log.error("Failed to read wallet plan history: %s", exc)
+        raw_entries = []
+
+    history: List[Dict[str, Any]] = []
+    for raw in raw_entries:
+        try:
+            history.append(json.loads(raw))
+        except json.JSONDecodeError:
+            log.warning("Skipping malformed wallet plan entry")
+
+    return {"history": history}
+
+
+@app.get("/api/copytrade/wallet-scores")
+@rate_limit(max_requests=50, window_seconds=60)
+async def get_copytrade_wallet_scores(request: Request):
+    """Expose the copy-trade agent's latest wallet scoring snapshot."""
+    scores = await redis_client.get_json("copytrade:wallet_scores") or {}
+    if not isinstance(scores, dict):
+        log.warning("Unexpected wallet score payload type: %s", type(scores))
+        scores = {}
+    return {"wallets": scores}
+
+
+@app.get("/api/news/weighted")
+@rate_limit(max_requests=50, window_seconds=60)
+async def get_weighted_news_entries(request: Request):
+    """Return recency-weighted news sentiment entries from memory agent."""
+    keys: List[str] = []
+    entries: List[Dict[str, Any]] = []
+
+    if not redis_client.redis:
+        return {"entries": entries}
+
+    try:
+        keys = await redis_client.redis.keys("memory:news:weighted:*")
+    except Exception as exc:  # pragma: no cover - defensive logging
+        log.error("Failed to enumerate weighted news keys: %s", exc)
+        keys = []
+
+    for key in keys:
+        try:
+            entry = await redis_client.get_json(key)
+            if entry:
+                # Preserve ticker ordering by pushing market-wide sentiment last
+                entries.append(entry)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            log.warning("Unable to parse weighted news from %s: %s", key, exc)
+
+    entries.sort(
+        key=lambda item: item.get("last_updated", ""),
+        reverse=True,
+    )
+
+    return {"entries": entries}
+
+
+@app.get("/api/agent-schedule/profile")
+@rate_limit(max_requests=50, window_seconds=60)
+async def get_agent_schedule_profile(request: Request):
+    """Return the active agent scheduling profile for display in the UI."""
+    return {
+        "profile": settings.agent_schedule_profile,
+        "profiles": list(settings.agent_schedule_profiles.keys()),
+    }
 
 
 @app.get("/api/performance", response_model=PerformanceMetrics)

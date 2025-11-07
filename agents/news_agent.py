@@ -1,17 +1,23 @@
 """
 News Feed Agent - Monitors crypto news and analyzes sentiment using LLM.
 """
+import hashlib
 import httpx
-from typing import Optional, Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from openai import AsyncOpenAI
-from core.models import (
-    AgentType, AgentMessage, MessageType, NewsSentiment,
-    AgentSignal, SignalType
-)
+
+from agents.base_agent import BaseAgent
 from core.config import settings
 from core.logging import log
-from agents.base_agent import BaseAgent
+from core.models import (
+    AgentType,
+    AgentMessage,
+    AgentSignal,
+    MessageType,
+    NewsSentiment,
+    SignalType,
+)
 from core.mocks.mock_llm_service import get_mock_llm_service
 
 
@@ -74,8 +80,7 @@ class NewsAgent(BaseAgent):
             log.error(f"News Agent cycle error: {e}")
     
     def get_cycle_interval(self) -> int:
-        """Run every 15 minutes."""
-        return 900
+        return settings.get_agent_cycle_seconds(self.agent_type)
     
     async def _fetch_crypto_news(self) -> List[Dict]:
         """Fetch recent crypto news from various sources."""
@@ -155,15 +160,23 @@ class NewsAgent(BaseAgent):
                 )
                 
                 # Cache sentiment
-                await self.redis_client.set_json(
+                await self.redis.set_json(
                     f"news:sentiment:{ticker}",
-                    sentiment.dict(),
+                    {**sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
                     ttl=3600  # 1 hour
                 )
                 
                 # Send signal if sentiment is strong
                 if abs(sentiment_score) > 0.5 and confidence > 0.7:
                     await self._send_sentiment_signal(sentiment)
+
+                await self._broadcast_news_event(
+                    ticker,
+                    sentiment_score,
+                    confidence,
+                    sentiment.summary,
+                    sentiment.sources,
+                )
             
             return
         
@@ -238,13 +251,21 @@ Respond in JSON format:
                     # Cache sentiment
                     await self.redis.set_json(
                         f"news:sentiment:{ticker}",
-                        sentiment.dict(),
+                        {**sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
                         expire=3600  # 1 hour
                     )
                     
                     # Send signal if sentiment is strong
                     if abs(sentiment_score) > 0.5 and confidence > 0.7:
                         await self._send_sentiment_signal(sentiment)
+
+                    await self._broadcast_news_event(
+                        ticker,
+                        sentiment_score,
+                        confidence,
+                        sentiment.summary,
+                        sentiment.sources,
+                    )
             
         except Exception as e:
             log.error(f"Error analyzing news sentiment: {e}")
@@ -272,13 +293,20 @@ Respond in JSON format:
             )
             
             # Cache market sentiment
-            await self.redis_client.set_json(
+            await self.redis.set_json(
                 "news:market_sentiment",
-                market_sentiment.dict(),
+                {**market_sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
                 ttl=1800  # 30 minutes
             )
             
             log.info(f"Market sentiment: {market_sentiment.sentiment_score:.2f} (confidence: {market_sentiment.confidence:.2f})")
+            await self._broadcast_news_event(
+                None,
+                market_sentiment.sentiment_score,
+                market_sentiment.confidence,
+                market_sentiment.summary,
+                market_sentiment.sources,
+            )
             return
         
         if not self.llm_client or not news_items:
@@ -331,11 +359,18 @@ Respond in JSON format:
                 # Cache market sentiment
                 await self.redis.set_json(
                     "news:market_sentiment",
-                    market_sentiment.dict(),
+                    {**market_sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
                     expire=3600
                 )
                 
                 log.info(f"Market sentiment: {market_sentiment.sentiment_score:.2f} (confidence: {market_sentiment.confidence:.2f})")
+                await self._broadcast_news_event(
+                    None,
+                    market_sentiment.sentiment_score,
+                    market_sentiment.confidence,
+                    market_sentiment.summary,
+                    market_sentiment.sources,
+                )
             
         except Exception as e:
             log.error(f"Error generating market sentiment: {e}")
@@ -371,4 +406,33 @@ Respond in JSON format:
             
         except Exception as e:
             log.error(f"Error sending sentiment signal: {e}")
+
+    async def _broadcast_news_event(
+        self,
+        ticker: Optional[str],
+        sentiment_score: float,
+        confidence: float,
+        summary: str,
+        sources: List[str],
+    ):
+        try:
+            news_id_seed = f"{ticker}:{summary}"
+            news_id = hashlib.sha1(news_id_seed.encode("utf-8")).hexdigest()
+            payload = {
+                "news_id": news_id,
+                "ticker": ticker,
+                "sentiment_score": sentiment_score,
+                "confidence": confidence,
+                "summary": summary,
+                "sources": sources,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            message = AgentMessage(
+                message_type=MessageType.NEWS_EVENT,
+                sender=self.agent_type,
+                payload=payload,
+            )
+            await self.send_message(message)
+        except Exception as exc:
+            log.error(f"Failed to broadcast news event: {exc}")
 

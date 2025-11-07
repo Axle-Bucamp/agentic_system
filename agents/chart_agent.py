@@ -13,6 +13,7 @@ from core.models import (
 from core.config import settings
 from core.logging import log
 from agents.base_agent import BaseAgent
+from core import asset_registry
 
 
 class ChartAgent(BaseAgent):
@@ -40,15 +41,14 @@ class ChartAgent(BaseAgent):
         """Run periodic technical analysis on all supported assets."""
         log.debug("Chart Agent running cycle...")
         
-        for ticker in settings.supported_assets:
+        for ticker in asset_registry.get_assets():
             try:
                 await self._analyze_ticker(ticker)
             except Exception as e:
                 log.error(f"Chart Agent error analyzing {ticker}: {e}")
     
     def get_cycle_interval(self) -> int:
-        """Run every 5 minutes."""
-        return 300
+        return settings.get_agent_cycle_seconds(self.agent_type)
     
     async def _analyze_ticker(self, ticker: str):
         """Perform technical analysis on a ticker."""
@@ -88,9 +88,11 @@ class ChartAgent(BaseAgent):
             await self.send_signal(agent_signal.dict())
             
             # Cache signal
+            cached_signal = agent_signal.dict()
+            cached_signal["generated_at"] = datetime.utcnow().isoformat()
             await self.redis.set_json(
                 f"chart:signal:{ticker}",
-                agent_signal.dict(),
+                cached_signal,
                 expire=300
             )
             

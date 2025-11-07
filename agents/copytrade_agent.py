@@ -22,6 +22,9 @@ class CopyTradeAgent(BaseAgent):
         self.web3_clients: Dict[str, Web3] = {}
         self.http_client: Optional[httpx.AsyncClient] = None
         self.tracked_wallets: List[Dict] = []
+        self.wallet_signal_decay_hours = 24
+        self.minimum_success_rate = 0.25
+        self.max_tracked_wallets = 25
         
     async def initialize(self):
         """Initialize Web3 clients for different blockchains."""
@@ -61,13 +64,14 @@ class CopyTradeAgent(BaseAgent):
             
             # Discover new successful wallets
             await self._discover_successful_wallets()
+            await self._prune_wallets()
+            await self._publish_wallet_scores()
             
         except Exception as e:
             log.error(f"Copy Trade Agent cycle error: {e}")
     
     def get_cycle_interval(self) -> int:
-        """Run every 3 minutes."""
-        return 180
+        return settings.get_agent_cycle_seconds(self.agent_type)
     
     async def _load_tracked_wallets(self):
         """Load list of tracked wallets from Redis."""
@@ -104,10 +108,13 @@ class CopyTradeAgent(BaseAgent):
                 "added_at": datetime.utcnow().isoformat(),
                 "performance": 0.0,
                 "trade_count": 0,
-                "success_rate": 0.0
+                "success_rate": 0.4,
+                "signal_score": 0.0
             }
             
             self.tracked_wallets.append(wallet_info)
+            if len(self.tracked_wallets) > self.max_tracked_wallets:
+                await self._prune_wallets(force=True)
             await self.redis.set_json("copytrade:tracked_wallets", self.tracked_wallets)
             
             log.info(f"Added wallet {wallet_address} on {blockchain} to tracking")
@@ -125,18 +132,35 @@ class CopyTradeAgent(BaseAgent):
             transactions = await self._get_wallet_transactions(address, blockchain)
             
             if not transactions:
+                wallet_info["signal_score"] = wallet_info.get("signal_score", 0.0) * 0.9
                 return
             
             # Analyze transactions for trading activity
+            signal_emitted = False
             for tx in transactions[:5]:  # Check last 5 transactions
                 trade_signal = await self._analyze_transaction(tx, wallet_info)
                 
                 if trade_signal:
+                    signal_emitted = True
+                    wallet_info["last_signal_at"] = datetime.utcnow().isoformat()
+                    wallet_info["trade_count"] = wallet_info.get("trade_count", 0) + 1
+                    wallet_info["success_rate"] = min(
+                        0.95,
+                        wallet_info.get("success_rate", 0.4) * 0.7 + 0.3,
+                    )
+                    wallet_info["signal_score"] = wallet_info.get("signal_score", 0.0) * 0.7 + 1.0
                     # Send copy trade signal
                     await self._send_copy_trade_signal(trade_signal)
             
+            if not signal_emitted:
+                wallet_info["success_rate"] = max(
+                    0.05, wallet_info.get("success_rate", 0.4) * 0.95
+                )
+                wallet_info["signal_score"] = wallet_info.get("signal_score", 0.0) * 0.9
+
             # Update wallet performance
             await self._update_wallet_performance(wallet_info)
+            await self.redis.set_json("copytrade:tracked_wallets", self.tracked_wallets)
             
         except Exception as e:
             log.error(f"Error monitoring wallet {wallet_info['address']}: {e}")
@@ -250,7 +274,8 @@ class CopyTradeAgent(BaseAgent):
             ticker = "ETH"  # Placeholder
             
             # Calculate confidence based on wallet performance
-            confidence = min(0.5 + (wallet_info.get("success_rate", 0) * 0.5), 0.95)
+            success_rate = wallet_info.get("success_rate", 0.4)
+            confidence = max(0.1, min(0.95, success_rate))
             
             signal = CopyTradeSignal(
                 wallet_address=wallet_info["address"],
@@ -291,9 +316,24 @@ class CopyTradeAgent(BaseAgent):
             
             await self.send_signal(agent_signal.dict())
             log.info(f"Sent copy trade signal: {signal.ticker} {signal.action.value} from {signal.wallet_address[:8]}...")
+            await self._cache_last_signal(signal)
             
         except Exception as e:
             log.error(f"Error sending copy trade signal: {e}")
+
+    async def _cache_last_signal(self, signal: CopyTradeSignal):
+        payload = {
+            "wallet_address": signal.wallet_address,
+            "blockchain": signal.blockchain,
+            "amount": signal.amount,
+            "confidence": signal.confidence,
+            "timestamp": signal.timestamp.isoformat() if isinstance(signal.timestamp, datetime) else signal.timestamp,
+        }
+        await self.redis.set_json(
+            f"copytrade:last_signal:{signal.ticker}",
+            payload,
+            expire=600,
+        )
     
     async def _update_wallet_performance(self, wallet_info: Dict):
         """Update performance metrics for a tracked wallet."""
@@ -306,24 +346,83 @@ class CopyTradeAgent(BaseAgent):
             performance = await self.redis.get_json(perf_key)
             
             if not performance:
-                # Initialize performance tracking
                 performance = {
                     "total_trades": 0,
                     "successful_trades": 0,
                     "total_pnl": 0.0,
-                    "success_rate": 0.0
+                    "success_rate": wallet_info.get("success_rate", 0.4),
+                    "signal_score": wallet_info.get("signal_score", 0.0),
                 }
-            
-            # Update wallet info
+            else:
+                performance["success_rate"] = wallet_info.get("success_rate", performance.get("success_rate", 0.4))
+                performance["signal_score"] = wallet_info.get("signal_score", performance.get("signal_score", 0.0))
+            performance["total_trades"] = wallet_info.get("trade_count", performance.get("total_trades", 0))
+            performance["total_pnl"] = wallet_info.get("performance", performance.get("total_pnl", 0.0))
             wallet_info["performance"] = performance.get("total_pnl", 0.0)
-            wallet_info["success_rate"] = performance.get("success_rate", 0.0)
-            wallet_info["trade_count"] = performance.get("total_trades", 0)
-            
-            # Save updated wallet list
-            await self.redis.set_json("copytrade:tracked_wallets", self.tracked_wallets)
+            await self.redis.set_json(perf_key, performance)
             
         except Exception as e:
             log.error(f"Error updating wallet performance: {e}")
+
+    async def _prune_wallets(self, force: bool = False):
+        try:
+            now = datetime.utcnow()
+            retained: List[Dict] = []
+            updated = False
+            for wallet in self.tracked_wallets:
+                last_signal_at = wallet.get("last_signal_at")
+                hours_since_signal = (
+                    (now - self._parse_timestamp(last_signal_at)).total_seconds() / 3600
+                    if last_signal_at
+                    else float("inf")
+                )
+                success_rate = wallet.get("success_rate", 0.0)
+                should_remove = force or (
+                    success_rate < self.minimum_success_rate
+                    and wallet.get("trade_count", 0) >= 3
+                )
+                if hours_since_signal > self.wallet_signal_decay_hours * 3:
+                    should_remove = True
+                if should_remove:
+                    log.info(
+                        "Pruning wallet %s (success_rate %.2f, inactivity %.1fh)",
+                        wallet["address"][:8] + "...",
+                        success_rate,
+                        hours_since_signal,
+                    )
+                    updated = True
+                    continue
+                wallet["signal_score"] = wallet.get("signal_score", 0.0) * 0.9
+                retained.append(wallet)
+
+            if updated or force:
+                self.tracked_wallets = retained[: self.max_tracked_wallets]
+                await self.redis.set_json("copytrade:tracked_wallets", self.tracked_wallets)
+        except Exception as e:
+            log.error(f"Error pruning wallets: {e}")
+
+    async def _publish_wallet_scores(self):
+        try:
+            summary = {
+                wallet["address"]: {
+                    "success_rate": wallet.get("success_rate", 0.0),
+                    "trade_count": wallet.get("trade_count", 0),
+                    "signal_score": round(wallet.get("signal_score", 0.0), 3),
+                    "last_signal_at": wallet.get("last_signal_at"),
+                }
+                for wallet in self.tracked_wallets
+            }
+            await self.redis.set_json("copytrade:wallet_scores", summary, expire=600)
+        except Exception as e:
+            log.error(f"Error publishing wallet scores: {e}")
+
+    def _parse_timestamp(self, value: Optional[str]) -> datetime:
+        if not value:
+            return datetime.utcnow() - timedelta(hours=self.wallet_signal_decay_hours * 4)
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return datetime.utcnow() - timedelta(hours=self.wallet_signal_decay_hours * 4)
     
     async def _discover_successful_wallets(self):
         """Discover new successful wallets to track."""

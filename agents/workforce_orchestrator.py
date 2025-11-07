@@ -5,13 +5,16 @@ Replaces the traditional OrchestratorAgent with CAMEL Workforce for advanced
 multi-agent task orchestration, decomposition, and coordination.
 """
 import asyncio
-from typing import Optional, Dict, Any, List
+import uuid
+import json
 from datetime import datetime
 from core.config import settings
+from typing import Any, Dict, List, Optional
 from core.logging import log
 from core.models import AgentType, AgentMessage, MessageType
 from core.redis_client import RedisClient
 from agents.base_agent import BaseAgent
+from core import asset_registry
 from agents.workforce_workers import (
     DQNWorker,
     ChartAnalysisWorker,
@@ -48,6 +51,8 @@ class WorkforceOrchestratorAgent(BaseAgent):
         self.workers: Dict[str, Any] = {}
         self.memory_manager: Optional[CamelMemoryManager] = None
         self.running = False
+        self._last_wallet_plan_timestamp: Optional[str] = None
+        self._workforce_available: bool = True
         
     async def initialize(self):
         """Initialize the Workforce orchestrator."""
@@ -105,35 +110,42 @@ class WorkforceOrchestratorAgent(BaseAgent):
             
             # Create workforce
             log.debug("Creating Workforce instance...")
-            # Note: CAMEL Workforce may use different parameter names
-            # Try with coordinator and task_agent, or use default initialization
+            # Note: CAMEL Workforce API - try minimal initialization first
             try:
-                # Try the new API first (if coordinator_agent is not supported)
+                # Try with just description (minimal parameters)
                 self.workforce = Workforce(
-                    description="Trading System Workforce - Coordinates specialized workers for trading tasks",
-                    coordinator=coordinator_agent,
-                    task_agent=task_agent,
-                    use_structured_output_handler=True,
-                    share_memory=True,
+                    description="Trading System Workforce - Coordinates specialized workers for trading tasks"
                 )
-                log.info("Workforce created with coordinator parameter")
+                log.info("Workforce created with minimal initialization")
+                
+                # Try to set coordinator and task agent if attributes exist
+                if hasattr(self.workforce, 'coordinator'):
+                    self.workforce.coordinator = coordinator_agent
+                    log.debug("Set coordinator agent on workforce")
+                elif hasattr(self.workforce, 'coordinator_agent'):
+                    self.workforce.coordinator_agent = coordinator_agent
+                    log.debug("Set coordinator_agent on workforce")
+                
+                if hasattr(self.workforce, 'task_agent'):
+                    self.workforce.task_agent = task_agent
+                    log.debug("Set task_agent on workforce")
+                elif hasattr(self.workforce, 'task_decomposition_agent'):
+                    self.workforce.task_decomposition_agent = task_agent
+                    log.debug("Set task_decomposition_agent on workforce")
+                    
             except TypeError as e:
-                log.warning(f"Workforce initialization with coordinator failed: {e}, trying alternative")
+                log.warning(f"Workforce initialization failed: {e}, trying with coordinator_agent parameter")
                 try:
-                    # Try without explicit coordinator/task_agent (they may be created internally)
+                    # Try with coordinator_agent parameter name
                     self.workforce = Workforce(
                         description="Trading System Workforce - Coordinates specialized workers for trading tasks",
-                        use_structured_output_handler=True,
-                        share_memory=True,
+                        coordinator_agent=coordinator_agent,
+                        task_agent=task_agent,
                     )
-                    # Manually set coordinator and task agent if possible
-                    if hasattr(self.workforce, 'coordinator'):
-                        self.workforce.coordinator = coordinator_agent
-                    if hasattr(self.workforce, 'task_agent'):
-                        self.workforce.task_agent = task_agent
-                    log.info("Workforce created with default initialization and manual agent assignment")
+                    log.info("Workforce created with coordinator_agent parameter")
                 except Exception as e2:
                     log.error(f"All Workforce initialization attempts failed: {e2}")
+                    log.error(f"Error details: {type(e2).__name__}: {e2}")
                     raise
             
             # Add workers to workforce
@@ -142,8 +154,9 @@ class WorkforceOrchestratorAgent(BaseAgent):
             log.info("Workforce Orchestrator initialized successfully")
             
         except Exception as e:
+            self._workforce_available = False
             log.error(f"Failed to initialize Workforce Orchestrator: {e}")
-            raise
+            log.warning("Workforce orchestration disabled; continuing without CAMEL workforce support.")
     
     async def _initialize_workers(self):
         """Initialize all worker agents."""
@@ -269,6 +282,10 @@ class WorkforceOrchestratorAgent(BaseAgent):
     
     async def _handle_signal_with_workforce(self, message: AgentMessage):
         """Handle signal by processing it through the workforce."""
+        if not self._workforce_available:
+            log.debug("Workforce unavailable; skipping workforce signal processing.")
+            return
+
         try:
             signal_data = message.payload
             ticker = signal_data.get("ticker")
@@ -277,6 +294,10 @@ class WorkforceOrchestratorAgent(BaseAgent):
             if not ticker:
                 return
             
+            # Log AI decision start
+            decision_id = str(uuid.uuid4())
+            log.info(f"[AI_DECISION] Starting decision {decision_id} for {ticker} with action {action}")
+            
             # Create a task for the workforce
             task_description = (
                 f"Analyze trading signal for {ticker} with action {action}. "
@@ -284,30 +305,70 @@ class WorkforceOrchestratorAgent(BaseAgent):
                 f"and if appropriate, execute the trade."
             )
             
-            if self.workforce:
-                task = Task(content=task_description)
-                # Note: process_task may be async or sync depending on CAMEL version
-                try:
-                    if asyncio.iscoroutinefunction(self.workforce.process_task):
-                        result = await self.workforce.process_task(task)
-                    else:
-                        result = self.workforce.process_task(task)
-                except AttributeError:
-                    # Fallback: use process_task_async if available
-                    result = await self.workforce.process_task_async(task)
-                
-                log.info(f"Workforce processed task for {ticker}: {result}")
-                
-                # Store result in memory
-                if self.memory_manager:
-                    result_message = BaseMessage.make_assistant_message(
-                        role_name="Workforce",
-                        content=str(result)
-                    )
-                    self.memory_manager.write_record(result_message)
+            # Store decision metadata
+            decision_metadata = {
+                "decision_id": decision_id,
+                "ticker": ticker,
+                "action": action,
+                "task_description": task_description,
+                "timestamp": datetime.utcnow().isoformat(),
+                "status": "processing",
+                "steps": []
+            }
+            
+            # Store in Redis for UI access
+            await self.redis.set_json(f"ai_decision:{decision_id}", decision_metadata)
+            
+            task = Task(content=task_description)
+
+            log.info(f"[AI_DECISION] Task created: {task_description}")
+            decision_metadata["steps"].append({
+                "step": "task_created",
+                "description": task_description,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+
+            await self._summarize_wallet_plan()
+
+            result = await self._process_task_with_workforce(task)
+            if result is None:
+                log.warning("[AI_DECISION] Workforce unavailable; skipping CAMEL processing for %s", ticker)
+                decision_metadata["steps"].append({
+                    "step": "workforce_disabled",
+                    "description": "Workforce processing skipped; using baseline heuristic outputs.",
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+                decision_metadata["status"] = "degraded"
+                await self.redis.set_json(f"ai_decision:{decision_id}", decision_metadata)
+                return
+
+            log.info(f"[AI_DECISION] Workforce processed task for {ticker}: {result}")
+            decision_metadata["steps"].append({
+                "step": "task_processed",
+                "result": str(result),
+                "timestamp": datetime.utcnow().isoformat()
+            })
+
+            decision_metadata["status"] = "completed"
+            decision_metadata["result"] = str(result)
+            decision_metadata["completed_at"] = datetime.utcnow().isoformat()
+            await self.redis.set_json(f"ai_decision:{decision_id}", decision_metadata)
+
+            if self.memory_manager:
+                result_message = BaseMessage.make_assistant_message(
+                    role_name="Workforce",
+                    content=str(result)
+                )
+                self.memory_manager.write_record(result_message)
+                log.info(f"[AI_DECISION] Decision {decision_id} stored in memory")
             
         except Exception as e:
-            log.error(f"Error handling signal with workforce: {e}")
+            log.error(f"[AI_DECISION] Error handling signal with workforce: {e}")
+            if 'decision_id' in locals():
+                decision_metadata["status"] = "error"
+                decision_metadata["error"] = str(e)
+                decision_metadata["error_at"] = datetime.utcnow().isoformat()
+                await self.redis.set_json(f"ai_decision:{decision_id}", decision_metadata)
     
     async def _handle_risk_alert(self, message: AgentMessage):
         """Handle risk alert from risk agent."""
@@ -329,15 +390,21 @@ class WorkforceOrchestratorAgent(BaseAgent):
     async def run_cycle(self):
         """Run periodic decision-making cycle."""
         log.debug("Workforce Orchestrator running cycle...")
+
+        if not self._workforce_available:
+            log.debug("Workforce orchestrator disabled; skipping cycle execution.")
+            return
         
         try:
+            await self._summarize_wallet_plan()
+
             # Check if trading is paused
             if await self.redis.exists("orchestrator:trading_paused"):
                 log.debug("Trading is paused due to risk alert")
                 return
             
             # Process each supported asset
-            for ticker in settings.supported_assets:
+            for ticker in asset_registry.get_assets():
                 try:
                     # Create a comprehensive trading task
                     task_description = (
@@ -348,19 +415,13 @@ class WorkforceOrchestratorAgent(BaseAgent):
                         f"4. If conditions are favorable, execute appropriate trade."
                     )
                     
-                    if self.workforce:
-                        task = Task(content=task_description)
-                        # Note: process_task may be async or sync depending on CAMEL version
-                        try:
-                            if asyncio.iscoroutinefunction(self.workforce.process_task):
-                                result = await self.workforce.process_task(task)
-                            else:
-                                result = self.workforce.process_task(task)
-                        except AttributeError:
-                            # Fallback: use process_task_async if available
-                            result = await self.workforce.process_task_async(task)
-                        
-                        log.info(f"Workforce cycle result for {ticker}: {result}")
+                    task = Task(content=task_description)
+                    result = await self._process_task_with_workforce(task)
+                    if result is None:
+                        log.debug("Workforce disabled; skipping automated analysis for %s", ticker)
+                        continue
+
+                    log.info(f"Workforce cycle result for {ticker}: {result}")
                         
                 except Exception as e:
                     log.error(f"Error processing cycle for {ticker}: {e}")
@@ -371,6 +432,70 @@ class WorkforceOrchestratorAgent(BaseAgent):
     def get_cycle_interval(self) -> int:
         """Run every 5 minutes."""
         return 300
+
+    async def _summarize_wallet_plan(self, force: bool = False):
+        """Create and persist an LLM-driven summary of the latest wallet plan."""
+        try:
+            plan = await self.redis.get_json("orchestrator:wallet_plan")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            log.debug("Unable to fetch wallet plan for workforce summary: %s", exc)
+            return
+
+        if not plan:
+            return
+
+        plan_id = plan.get("generated_at")
+        if not force and plan_id and plan_id == self._last_wallet_plan_timestamp:
+            return
+
+        allocations = plan.get("allocations", {})
+        total_value = plan.get("total_value_usdc", 0)
+        high_risk_assets = [
+            ticker
+            for ticker, entry in allocations.items()
+            if isinstance(entry, dict) and str(entry.get("risk_level", "")).upper() in {"HIGH", "CRITICAL"}
+        ]
+
+        plan_brief = json.dumps(allocations, indent=2)
+        instructions = (
+            "You are the strategic portfolio analyst for a multi-agent trading desk. \n"
+            "Summarize the wallet balancing plan using bullet points. \n"
+            "Highlight: 1) Key allocations with rationale, 2) High-risk assets, 3) Recommended stop-loss windows, 4) Gas fee impact. \n"
+            "Close with a one sentence executive summary." 
+        )
+
+        summary_text: Optional[str] = None
+        if self.workforce and self._workforce_available:
+            task_body = (
+                f"Plan timestamp: {plan_id}\n"
+                f"Total value (USDC): {total_value}\n"
+                f"High risk tickers: {', '.join(high_risk_assets) if high_risk_assets else 'none'}\n"
+                f"Allocations JSON:\n{plan_brief}\n\n{instructions}"
+            )
+            task = Task(content=task_body)
+            result = await self._process_task_with_workforce(task)
+            if result is not None:
+                summary_text = str(result)
+                log.info("[WORKFORCE] Wallet plan summary generated via workforce")
+
+        if not summary_text:
+            summary_text = (
+                "Automated summary unavailable. Review portfolio allocations, risk levels, and stop-loss guidance manually."
+            )
+
+        summary_payload = {
+            "generated_at": plan_id,
+            "summary": summary_text,
+            "high_risk_assets": high_risk_assets,
+            "total_value_usdc": total_value,
+        }
+
+        try:
+            await self.redis.set_json("orchestrator:wallet_plan_summary", summary_payload)
+            log.bind(PORTFOLIO_PLAN=True).info("Wallet plan summary refreshed: {}", summary_payload)
+            self._last_wallet_plan_timestamp = plan_id
+        except Exception as exc:  # pragma: no cover - persistence failure
+            log.error("Failed to persist wallet plan summary: %s", exc)
     
     async def stop(self):
         """Stop the orchestrator and cleanup."""
@@ -388,4 +513,44 @@ class WorkforceOrchestratorAgent(BaseAgent):
         
         # Call parent stop method
         await super().stop()
+
+    def _should_disable_workforce(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        markers = (
+            "models/gemini",
+            "not found",
+            "api key",
+            "unauthorized",
+            "quota",
+        )
+        return any(marker in message for marker in markers)
+
+    async def _process_task_with_workforce(self, task: Task) -> Optional[Any]:
+        """Safely run a workforce task, disabling the workforce on persistent failures."""
+        if not self.workforce or not self._workforce_available:
+            return None
+
+        log.debug("[WORKFORCE] Processing task payload: %s", task.content[:200])
+
+        try:
+            processor = getattr(self.workforce, "process_task", None)
+            if callable(processor):
+                if asyncio.iscoroutinefunction(processor):
+                    return await processor(task)
+                return processor(task)
+
+            async_processor = getattr(self.workforce, "process_task_async", None)
+            if callable(async_processor):
+                return await async_processor(task)
+
+            log.warning("Workforce instance has no process_task handler; disabling workforce")
+            self._workforce_available = False
+            return None
+
+        except Exception as exc:
+            log.error("Workforce processing error: %s", exc)
+            if self._should_disable_workforce(exc):
+                self._workforce_available = False
+                log.warning("Disabling workforce after repeated model failures. Falling back to rule-based orchestration.")
+            return None
 

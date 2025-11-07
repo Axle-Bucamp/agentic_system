@@ -64,6 +64,22 @@ if _models_py_path.exists():
         Portfolio = _models_py.Portfolio
     else:
         Portfolio = None
+    if hasattr(_models_py, 'GraphMemoryNode'):
+        GraphMemoryNode = _models_py.GraphMemoryNode
+    else:
+        GraphMemoryNode = None
+    if hasattr(_models_py, 'GraphMemoryEdge'):
+        GraphMemoryEdge = _models_py.GraphMemoryEdge
+    else:
+        GraphMemoryEdge = None
+    if hasattr(_models_py, 'TradeMemoryEntry'):
+        TradeMemoryEntry = _models_py.TradeMemoryEntry
+    else:
+        TradeMemoryEntry = None
+    if hasattr(_models_py, 'NewsMemoryEntry'):
+        NewsMemoryEntry = _models_py.NewsMemoryEntry
+    else:
+        NewsMemoryEntry = None
     # ExchangeType is in exchange_interface, not models.py
     try:
         from core.exchange_interface import ExchangeType
@@ -105,4 +121,12 @@ if Portfolio is not None:
     __all__.append("Portfolio")
 if ExchangeType is not None:
     __all__.append("ExchangeType")
+if 'GraphMemoryNode' in globals() and GraphMemoryNode is not None:
+    __all__.append("GraphMemoryNode")
+if 'GraphMemoryEdge' in globals() and GraphMemoryEdge is not None:
+    __all__.append("GraphMemoryEdge")
+if 'TradeMemoryEntry' in globals() and TradeMemoryEntry is not None:
+    __all__.append("TradeMemoryEntry")
+if 'NewsMemoryEntry' in globals() and NewsMemoryEntry is not None:
+    __all__.append("NewsMemoryEntry")
 
