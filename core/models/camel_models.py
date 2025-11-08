@@ -3,7 +3,7 @@ CAMEL Model Configuration Factory
 
 Supports multiple model providers: OpenAI, Gemini, and local models.
 """
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from core.config import settings
 from core.logging import log
 
@@ -20,6 +20,7 @@ class CamelModelFactory:
     """Factory for creating CAMEL-compatible model instances."""
     
     _model_cache: Dict[str, Any] = {}
+    _fallback_notice_logged: bool = False
     
     @classmethod
     def get_model_type(cls, model_name: str) -> Optional[ModelType]:
@@ -68,7 +69,7 @@ class CamelModelFactory:
         if not CAMEL_AVAILABLE:
             raise ImportError("CAMEL-AI is not installed. Install with: pip install camel-ai")
         
-        model_name = model_name or settings.camel_default_model
+        model_name = cls._resolve_model_name(model_name or settings.camel_default_model)
         cache_key = f"{model_name}_{api_key or 'default'}"
         
         # Return cached model if available
@@ -82,14 +83,9 @@ class CamelModelFactory:
         
         # Determine API key based on model type
         if not api_key:
-            if "gemini" in model_name.lower():
-                api_key = settings.gemini_api_key
-                if not api_key:
-                    log.warning(f"No Gemini API key found, falling back to OpenAI")
-                    model_type = ModelType.GPT_4O_MINI
-                    api_key = settings.openai_api_key
-            else:
-                api_key = settings.openai_api_key
+            api_key = cls._resolve_api_key(model_name)
+            if not api_key:
+                raise ValueError(f"No API key configured for resolved model '{model_name}'")
         
         if not api_key:
             raise ValueError(f"No API key provided for model {model_name}")
@@ -103,19 +99,25 @@ class CamelModelFactory:
             )
 
         try:
-            # Determine model platform based on model type
-            if "gemini" in model_name.lower():
-                model_platform = ModelPlatformType.GEMINI
-                model_config = kwargs if kwargs else None
-            elif "gpt" in model_name.lower() or "claude" in model_name.lower():
-                model_platform = ModelPlatformType.OPENAI if "gpt" in model_name.lower() else ModelPlatformType.ANTHROPIC
-                model_config = kwargs if kwargs else None
-            else:
-                # Default to OpenAI platform
-                model_platform = ModelPlatformType.OPENAI
-                model_config = kwargs if kwargs else None
-
+            model_platform = cls._resolve_platform(model_name)
             model = _build_model(model_type, model_platform, api_key)
+
+            fallback_factory: Optional[Callable[[], Any]] = None
+            fallback_name = None
+            if cls._should_prepare_fallback(model_name):
+                fallback_name = settings.camel_fallback_model
+                fallback_factory = cls._build_fallback_factory(
+                    fallback_name=fallback_name,
+                    build_fn=_build_model,
+                )
+
+            if fallback_factory:
+                model = _FallbackModelWrapper(
+                    primary=model,
+                    fallback_factory=fallback_factory,
+                    primary_name=model_name,
+                    fallback_name=fallback_name or "gpt-4o-mini",
+                )
 
             cls._model_cache[cache_key] = model
             log.info(f"Created CAMEL model: {model_name}")
@@ -125,29 +127,163 @@ class CamelModelFactory:
             error_msg = str(e)
             log.error(f"Failed to create model {model_name}: {error_msg}")
 
-            # Attempt graceful fallback for Gemini or other remote providers
             if "gemini" in model_name.lower():
-                fallback_key = settings.openai_api_key
-                if fallback_key:
-                    try:
-                        fallback_model = _build_model(
-                            ModelType.GPT_4O_MINI,
-                            ModelPlatformType.OPENAI,
-                            fallback_key,
-                        )
-                        fallback_cache_key = f"fallback_{cache_key}"
-                        cls._model_cache[fallback_cache_key] = fallback_model
-                        log.warning(
-                            "Gemini model '%s' unavailable (%s); using OpenAI fallback '%s'",
-                            model_name,
-                            error_msg,
-                            ModelType.GPT_4O_MINI.value if hasattr(ModelType.GPT_4O_MINI, "value") else "gpt-4o-mini",
-                        )
-                        return fallback_model
-                    except Exception as fallback_error:
-                        log.error("Fallback OpenAI model creation failed: %s", fallback_error)
+                fallback = cls._attempt_immediate_fallback(
+                    cache_key=cache_key,
+                    build_fn=_build_model,
+                    original_error=error_msg,
+                    model_name=model_name,
+                )
+                if fallback:
+                    return fallback
 
             raise
+
+    @classmethod
+    def _resolve_model_name(cls, requested: str) -> str:
+        candidate = (requested or "").strip() or "auto"
+        if candidate.lower() != "auto":
+            return candidate
+
+        priorities = []
+        primary = settings.camel_primary_model.strip() if settings.camel_primary_model else ""
+        fallback = settings.camel_fallback_model.strip() if settings.camel_fallback_model else ""
+
+        if settings.camel_prefer_gemini and primary:
+            priorities.append(primary)
+            if fallback:
+                priorities.append(fallback)
+        else:
+            if fallback:
+                priorities.append(fallback)
+            if primary:
+                priorities.append(primary)
+
+        for name in priorities:
+            lowered = name.lower()
+            if lowered.startswith("gemini") and not settings.gemini_api_key:
+                continue
+            if lowered.startswith("gpt") and not settings.openai_api_key:
+                continue
+            return name
+
+        raise ValueError(
+            "No CAMEL model can be resolved. Configure GEMINI_API_KEY or OPENAI_API_KEY (or disable camel_prefer_gemini)."
+        )
+
+    @classmethod
+    def _resolve_api_key(cls, model_name: str) -> Optional[str]:
+        lowered = model_name.lower()
+        if lowered.startswith("gemini"):
+            return settings.gemini_api_key
+        if lowered.startswith("gpt") or lowered.startswith("claude"):
+            return settings.openai_api_key
+        return settings.openai_api_key
+
+    @classmethod
+    def _resolve_platform(cls, model_name: str) -> ModelPlatformType:
+        lowered = model_name.lower()
+        if lowered.startswith("gemini"):
+            return ModelPlatformType.GEMINI
+        if lowered.startswith("claude"):
+            return ModelPlatformType.ANTHROPIC
+        return ModelPlatformType.OPENAI
+
+    @classmethod
+    def _should_prepare_fallback(cls, model_name: str) -> bool:
+        return (
+            "gemini" in model_name.lower()
+            and bool(settings.camel_fallback_model)
+            and bool(settings.openai_api_key)
+        )
+
+    @classmethod
+    def _build_fallback_factory(cls, fallback_name: str, build_fn: Callable[[ModelType, ModelPlatformType, str], Any]) -> Optional[Callable[[], Any]]:
+        if not fallback_name:
+            return None
+
+        fallback_type = cls.get_model_type(fallback_name) or ModelType.GPT_4O_MINI
+        fallback_platform = cls._resolve_platform(fallback_name)
+        fallback_key = cls._resolve_api_key(fallback_name)
+        if not fallback_key:
+            return None
+
+        def factory() -> Any:
+            log.warning(
+                "Switching CAMEL model to fallback '%s' after primary failures.",
+                fallback_name,
+            )
+            return build_fn(fallback_type, fallback_platform, fallback_key)
+
+        return factory
+
+    @classmethod
+    def _attempt_immediate_fallback(
+        cls,
+        cache_key: str,
+        build_fn: Callable[[ModelType, ModelPlatformType, str], Any],
+        original_error: str,
+        model_name: str,
+    ) -> Optional[Any]:
+        fallback_name = settings.camel_fallback_model
+        fallback_key = settings.openai_api_key
+        if fallback_key and fallback_name:
+            try:
+                fallback_model = build_fn(
+                    cls.get_model_type(fallback_name) or ModelType.GPT_4O_MINI,
+                    cls._resolve_platform(fallback_name),
+                    fallback_key,
+                )
+                cls._model_cache[f"fallback_{cache_key}"] = fallback_model
+                log.warning(
+                    "Primary model '%s' unavailable (%s); using fallback '%s'",
+                    model_name,
+                    original_error,
+                    fallback_name,
+                )
+                cls._fallback_notice_logged = True
+                return fallback_model
+            except Exception as fallback_error:
+                log.error("Immediate fallback creation failed: %s", fallback_error)
+        return None
+
+
+class _FallbackModelWrapper:
+    """Wrap CAMEL model to attempt seamless fallback on runtime errors."""
+
+    def __init__(
+        self,
+        primary: Any,
+        fallback_factory: Optional[Callable[[], Any]],
+        primary_name: str,
+        fallback_name: str,
+    ) -> None:
+        self._primary = primary
+        self._active = primary
+        self._fallback_factory = fallback_factory
+        self._fallback_name = fallback_name
+        self._primary_name = primary_name
+        self._has_switched = False
+
+    def run(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._active.run(*args, **kwargs)
+        except Exception as exc:
+            if self._has_switched or self._fallback_factory is None:
+                raise
+
+            log.warning(
+                "Primary CAMEL model '%s' raised %s; switching to fallback '%s'.",
+                self._primary_name,
+                exc.__class__.__name__,
+                self._fallback_name,
+            )
+            self._active = self._fallback_factory()
+            self._has_switched = True
+            return self._active.run(*args, **kwargs)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._active, item)
     
     @classmethod
     def create_coordinator_model(cls) -> Any:

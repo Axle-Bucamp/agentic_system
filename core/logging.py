@@ -1,12 +1,17 @@
 """
 Logging configuration for the Agentic Trading System.
 """
+from __future__ import annotations
+
 import importlib
+import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 from loguru import logger
+from redis import Redis
 
 from core.config import settings
 
@@ -33,19 +38,13 @@ def _configure_logfire() -> None:
             environment=settings.environment,
         )
 
-        # Attach Logfire handler to loguru
         handler_factory = getattr(logfire, "loguru_handler", None)
         if callable(handler_factory):
-            logger.add(
-                handler_factory(),
-                level=settings.log_level,
-                enqueue=True,
-            )
+            logger.add(handler_factory(), level=settings.log_level, enqueue=True)
             logger.info("Logfire loguru handler installed")
         else:
             logger.warning("Logfire loguru handler unavailable; falling back to std logging bridge")
 
-        # Ensure std logging is also instrumented for third-party libs
         try:
             configure_mod = importlib.import_module("logfire.integrations.logging")
             configure_logfire_logging = getattr(configure_mod, "configure_logging", None)
@@ -60,27 +59,61 @@ def _configure_logfire() -> None:
         logger.warning("Logfire integration disabled: %s", exc)
 
 
+class RedisLogSink:
+    """Loguru sink that writes log records to Redis capped list."""
+
+    def __init__(self, key: str, max_entries: int) -> None:
+        self.key = key
+        self.max_entries = max_entries
+        try:
+            self.client = Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                db=settings.redis_db,
+                decode_responses=True,
+            )
+            # Probe connection
+            self.client.ping()
+            self._available = True
+        except Exception as exc:
+            logger.warning("Redis log sink unavailable: %s", exc)
+            self._available = False
+
+    def write(self, message: Any) -> None:
+        if not self._available:
+            return
+        try:
+            record: Dict[str, Any] = message.record
+            payload = {
+                "timestamp": record["time"].isoformat(),
+                "level": record["level"].name,
+                "message": record["message"],
+                "name": record["name"],
+                "function": record["function"],
+                "line": record["line"],
+                "extra": record.get("extra", {}),
+            }
+            self.client.rpush(self.key, json.dumps(payload))
+            self.client.ltrim(self.key, -self.max_entries, -1)
+        except Exception as exc:
+            # Downgrade to debug to avoid recursive logging
+            logger.debug("Failed to push log entry to Redis: %s", exc)
+
+
 def setup_logging():
     """Configure loguru logger with appropriate settings."""
 
-    # Remove default handler
     logger.remove()
-    logger.configure(
-        extra={
-            "cluster": settings.cluster_name,
-            "instance": settings.agent_instance_id,
-        }
-    )
+    logger.configure(extra={"cluster": settings.cluster_name, "instance": settings.agent_instance_id})
 
-    # Console handler with colors
     logger.add(
         sys.stdout,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         level=settings.log_level,
         colorize=True,
     )
 
-    # File handler for all logs
     base_log_path = Path(settings.log_file)
     log_path = _resolve_log_path(base_log_path)
 
@@ -93,7 +126,6 @@ def setup_logging():
         compression="zip",
     )
 
-    # Separate file for errors
     error_log_path = _resolve_log_path(log_path.parent / "errors.log")
     logger.add(
         str(error_log_path),
@@ -104,7 +136,6 @@ def setup_logging():
         compression="zip",
     )
 
-    # Separate file for trading decisions
     trading_log_path = _resolve_log_path(log_path.parent / "trading_decisions.log")
     logger.add(
         str(trading_log_path),
@@ -116,7 +147,6 @@ def setup_logging():
         compression="zip",
     )
 
-    # File for orchestrator portfolio plans
     portfolio_log_path = _resolve_log_path(log_path.parent / "portfolio_plans.log")
     logger.add(
         str(portfolio_log_path),
@@ -128,13 +158,12 @@ def setup_logging():
         compression="zip",
     )
 
-    logger.info(
-        "Logging initialized - Level: %s, File: %s",
-        settings.log_level,
-        log_path,
-    )
+    if settings.log_redis_enabled:
+        redis_sink = RedisLogSink(settings.log_redis_list_key, settings.log_redis_max_entries)
+        logger.add(redis_sink, level="INFO", enqueue=False)
 
-    # Bridge standard logging to loguru for third-party modules
+    logger.info("Logging initialized - Level: %s, File: %s", settings.log_level, log_path)
+
     class LoguruHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             try:
@@ -157,6 +186,5 @@ def setup_logging():
     return logger
 
 
-# Initialize logger
 log = setup_logging()
 

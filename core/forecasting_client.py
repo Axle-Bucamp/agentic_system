@@ -374,9 +374,14 @@ class ForecastingClient:
             params = {"limit": limit}
             try:
                 response = await self._make_request("GET", f"/api/json/ohlc/{interval}/{ticker}", params=params)
-                candles = response.get("ohlc", response if isinstance(response, list) else [])
+                if isinstance(response, dict):
+                    candles = response.get("ohlc", [])
+                elif isinstance(response, list):
+                    candles = response
+                else:
+                    candles = []
             except Exception as e:
-                log.error("Failed to fetch OHLC for %s/%s: %s", ticker, interval, e)
+                log.error("Failed to fetch OHLC for {}/{}: {}", ticker, interval, e)
                 raise ForecastingAPIError(f"Failed to fetch OHLC data: {e}")
 
         self._set_cache(cache_key, candles, timedelta(minutes=2))

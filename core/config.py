@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional, Union, TYPE_CHECKING
 from pydantic import Field, ConfigDict, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 if TYPE_CHECKING:
     from core.models import AgentType
@@ -15,7 +15,10 @@ if TYPE_CHECKING:
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
-    model_config = ConfigDict(extra="ignore")  # Ignore extra environment variables
+    model_config = SettingsConfigDict(
+        extra="ignore",
+        env_ignore_empty=True,
+    )
     
     # API Configuration
     app_name: str = "Agentic Trading System"
@@ -62,10 +65,13 @@ class Settings(BaseSettings):
     vllm_endpoint: Optional[str] = Field(default="http://localhost:8002/v1", env="VLLM_ENDPOINT")
     
     # CAMEL Configuration (default to stable Gemini 1.5 Pro for best compatibility)
-    camel_default_model: str = Field(default="gemini-1.5-pro", env="CAMEL_DEFAULT_MODEL")
-    camel_coordinator_model: str = Field(default="gemini-1.5-pro", env="CAMEL_COORDINATOR_MODEL")
-    camel_task_model: str = Field(default="gemini-1.5-pro", env="CAMEL_TASK_MODEL")
-    camel_worker_model: str = Field(default="gemini-1.5-pro", env="CAMEL_WORKER_MODEL")
+    camel_default_model: str = Field(default="auto", env="CAMEL_DEFAULT_MODEL")
+    camel_coordinator_model: str = Field(default="auto", env="CAMEL_COORDINATOR_MODEL")
+    camel_task_model: str = Field(default="auto", env="CAMEL_TASK_MODEL")
+    camel_worker_model: str = Field(default="auto", env="CAMEL_WORKER_MODEL")
+    camel_primary_model: str = Field(default="gemini-1.5-pro", env="CAMEL_PRIMARY_MODEL")
+    camel_fallback_model: str = Field(default="gpt-4o-mini", env="CAMEL_FALLBACK_MODEL")
+    camel_prefer_gemini: bool = Field(default=True, env="CAMEL_PREFER_GEMINI")
     
     # Qdrant Configuration
     qdrant_host: str = Field(default="localhost", env="QDRANT_HOST")
@@ -114,10 +120,15 @@ class Settings(BaseSettings):
     deep_search_api_url: Optional[str] = Field(default=None, env="DEEP_SEARCH_API_URL")
     deep_search_api_key: Optional[str] = Field(default=None, env="DEEP_SEARCH_API_KEY")
     deep_search_sources: List[str] = Field(
-        default_factory=lambda: ["coindesk", "cointelegraph", "decrypt"],
-        env="DEEP_SEARCH_SOURCES",
+        default_factory=lambda: ["coindesk", "cointelegraph", "decrypt"]
     )
     arxiv_enabled: bool = Field(default=True, env="ARXIV_ENABLED")
+    deep_research_mcp_url: Optional[str] = Field(default=None, env="DEEP_RESEARCH_MCP_URL")
+    deep_research_depth: int = Field(default=2, env="DEEP_RESEARCH_DEPTH")
+    deep_research_breadth: int = Field(default=2, env="DEEP_RESEARCH_BREADTH")
+    deep_research_model: Optional[str] = Field(default=None, env="DEEP_RESEARCH_MODEL")
+    deep_research_source_preferences: Optional[str] = Field(default=None, env="DEEP_RESEARCH_SOURCE_PREFERENCES")
+    deep_research_timeout_seconds: int = Field(default=120, env="DEEP_RESEARCH_TIMEOUT_SECONDS")
     agent_instance_id: str = Field(
         default_factory=lambda: os.getenv("AGENT_INSTANCE_ID")
         or os.getenv("HOSTNAME")
@@ -188,6 +199,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     log_file: str = Field(default="/app/logs/trading_system.log", env="LOG_FILE")
     logfire_token: Optional[str] = Field(default=None, env="LOGFIRE_TOKEN")
+    log_redis_enabled: bool = Field(default=True, env="LOG_REDIS_ENABLED")
+    log_redis_list_key: str = Field(default="logs:recent", env="LOG_REDIS_LIST_KEY")
+    log_redis_max_entries: int = Field(default=1000, env="LOG_REDIS_MAX_ENTRIES")
 
     @model_validator(mode="before")
     @classmethod
@@ -206,6 +220,9 @@ class Settings(BaseSettings):
             "agent_heartbeat_interval",
             "agent_timeout",
             "default_agent_cycle_seconds",
+            "deep_research_depth",
+            "deep_research_breadth",
+            "deep_research_timeout_seconds",
         }
 
         string_fields = {
@@ -214,6 +231,9 @@ class Settings(BaseSettings):
             "mcp_api_url",
             "dex_simulator_url",
             "deep_search_api_url",
+            "deep_research_mcp_url",
+            "deep_research_model",
+            "deep_research_source_preferences",
         }
 
         for field_name in numeric_fields:
@@ -225,13 +245,6 @@ class Settings(BaseSettings):
             value = data.get(field_name)
             if isinstance(value, str) and not value.strip():
                 data.pop(field_name, None)
-
-        deep_sources = data.get("deep_search_sources")
-        if isinstance(deep_sources, str):
-            try:
-                data["deep_search_sources"] = [item.strip() for item in deep_sources.split(",") if item.strip()]
-            except Exception:
-                data.pop("deep_search_sources", None)
 
         return data
     

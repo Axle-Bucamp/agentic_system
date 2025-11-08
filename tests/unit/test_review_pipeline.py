@@ -23,3 +23,7 @@ async def test_weight_review_pipeline_overrides_prompt(monkeypatch):
     await pipeline.run(trigger="schedule")
     snapshot = await redis.get_json("orchestrator:agent_weights")
     assert snapshot["prompt"] == "custom prompt"
+    settings_payload = await redis.get_json("dashboard:settings")
+    assert "agent_prompts" in settings_payload
+    assert "mcp_overrides" in settings_payload
+    assert "news" in settings_payload["mcp_overrides"]

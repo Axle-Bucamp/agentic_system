@@ -6,11 +6,14 @@ import json
 import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
+from uuid import uuid4
 
 import httpx
 
+from core.config import settings
 from core.logging import log
 from core.models import FactInsight, NewsMemoryEntry
 from core.pipelines.storage import set_fact_insight
@@ -24,7 +27,8 @@ class SentimentSnapshot:
     last_updated: Optional[str]
 
 
-ARXIV_CACHE_KEY = "pipeline:fact:arxiv:{ticker}"
+RESEARCH_CACHE_KEY = "pipeline:fact:research:{ticker}"
+RESEARCH_CACHE_VERSION = 2
 
 
 class FactPipeline:
@@ -123,28 +127,132 @@ class FactPipeline:
         return headlines
 
     async def _load_research(self, ticker: str) -> List[Dict[str, Any]]:
-        cached = await self.redis.get_json(ARXIV_CACHE_KEY.format(ticker=ticker))
-        if cached:
+        cache_key = RESEARCH_CACHE_KEY.format(ticker=ticker)
+        cached = await self.redis.get_json(cache_key)
+        if cached and cached.get("version") == RESEARCH_CACHE_VERSION:
             return cached.get("entries", [])
 
+        entries: List[Dict[str, Any]] = []
+        arxiv_entries = await self._fetch_arxiv_research(ticker)
+        if arxiv_entries:
+            entries.extend(arxiv_entries)
+
+        deep_research_entries = await self._fetch_deep_research(ticker)
+        if deep_research_entries:
+            entries.extend(deep_research_entries)
+
+        if entries:
+            await self.redis.set_json(
+                cache_key,
+                {"version": RESEARCH_CACHE_VERSION, "entries": entries},
+                expire=self.research_ttl_seconds,
+            )
+
+        return entries
+
+    async def _fetch_arxiv_research(self, ticker: str) -> List[Dict[str, Any]]:
         try:
             client = await self._client_instance()
             query = quote_plus(f'all:"{ticker}" AND (ti:crypto OR ti:blockchain)')
             url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy=submittedDate&max_results=3"
             response = await client.get(url)
             response.raise_for_status()
-
-            entries = self._parse_arxiv_feed(response.text)
-
-            await self.redis.set_json(
-                ARXIV_CACHE_KEY.format(ticker=ticker),
-                {"entries": entries},
-                expire=self.research_ttl_seconds,
-            )
-            return entries
+            return self._parse_arxiv_feed(response.text)
         except Exception as exc:  # pragma: no cover - external dependency best-effort
             log.debug("Unable to fetch arXiv research for %s: %s", ticker, exc)
             return []
+
+    async def _fetch_deep_research(self, ticker: str) -> List[Dict[str, Any]]:
+        if not settings.deep_research_mcp_url:
+            return []
+
+        try:
+            client = await self._client_instance()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": str(uuid4()),
+                "method": "tools/call",
+                "params": {
+                    "name": "deep-research",
+                    "arguments": {
+                        "query": f"Latest developments affecting {ticker} cryptocurrency and blockchain adoption",
+                        "depth": max(1, min(5, settings.deep_research_depth)),
+                        "breadth": max(1, min(5, settings.deep_research_breadth)),
+                    },
+                },
+            }
+            if settings.deep_research_model:
+                payload["params"]["arguments"]["model"] = settings.deep_research_model
+            if settings.deep_research_source_preferences:
+                payload["params"]["arguments"]["sourcePreferences"] = settings.deep_research_source_preferences
+
+            timeout = settings.deep_research_timeout_seconds or 120
+            response = await client.post(
+                settings.deep_research_mcp_url,
+                json=payload,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+        except Exception as exc:  # pragma: no cover - external dependency best-effort
+            log.debug("Deep research MCP call failed for %s: %s", ticker, exc)
+            return []
+
+        try:
+            data = response.json()
+        except ValueError:
+            log.debug("Deep research MCP response was not JSON for %s", ticker)
+            return []
+
+        result = data.get("result") or {}
+        content = result.get("content") or []
+        summary_text = ""
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                summary_text = item.get("text", "")
+                break
+        metadata = result.get("metadata") or {}
+        visited = metadata.get("visitedUrls") or []
+        learnings = metadata.get("learnings") or []
+
+        if not summary_text and not visited:
+            return []
+
+        entries: List[Dict[str, Any]] = []
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        first_url = next((u for u in visited if isinstance(u, str) and u.startswith("http")), None)
+
+        if summary_text:
+            entries.append(
+                {
+                    "title": f"Deep research findings for {ticker}",
+                    "url": first_url,
+                    "source": "DeepResearch",
+                    "summary": self._truncate(summary_text, 600),
+                    "published_at": timestamp,
+                }
+            )
+
+        for idx, url in enumerate(visited[:5]):
+            if not isinstance(url, str):
+                continue
+            domain = urlparse(url).netloc if url.startswith("http") else ""
+            title = None
+            if isinstance(learnings, list) and idx < len(learnings):
+                learning = learnings[idx]
+                if isinstance(learning, str):
+                    title = learning[:140]
+            entries.append(
+                {
+                    "title": title or f"Research source #{idx + 1}",
+                    "url": url,
+                    "source": domain or "DeepResearch",
+                    "summary": None,
+                    "published_at": timestamp,
+                }
+            )
+
+        return entries
 
     def _parse_arxiv_feed(self, feed_text: str) -> List[Dict[str, Any]]:
         entries: List[Dict[str, Any]] = []
@@ -171,6 +279,13 @@ class FactPipeline:
                 }
             )
         return entries
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        truncated = text[:limit].rsplit(" ", 1)[0]
+        return truncated + "…"
 
     def _derive_confidence(self, weight: float, reference_count: int) -> float:
         base = min(max(weight / 5.0, 0.1), 1.0)  # up to 5 aggregated weights for max

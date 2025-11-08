@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from statistics import fmean
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from core.config import settings
 from core.logging import log
@@ -25,6 +25,25 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     AgentType.RISK.value: 0.05,
 }
 
+DEFAULT_AGENT_PROMPTS: Dict[str, str] = {
+    AgentType.TREND.value: "Blend DQN distributions with technical indicators to surface trend direction, cite confidence bands, and call out volatility spikes.",
+    AgentType.FACT.value: "Summarize macro and micro catalysts with sources, include sentiment scores, and highlight disagreements in coverage.",
+    AgentType.DQN.value: "Report forecast distribution (sell/hold/buy) with expected move and note when model confidence is low.",
+    AgentType.CHART.value: "Explain key indicators (RSI, MACD, Bollinger) in two sentences and align with risk tolerances.",
+    AgentType.COPYTRADE.value: "Validate copy candidates with on-chain behavior, recent success rate, and risk tier reminders.",
+    AgentType.NEWS.value: "Prioritize regulatory, protocol, and market-moving headlines; attach deep-search references and quick sentiment tags.",
+    AgentType.RISK.value: "Return updated stop-loss, drawdown, and exposure metrics; insist on mitigation if limits breached.",
+}
+
+DEFAULT_MCP_SETTINGS: Dict[str, Dict[str, object]] = {
+    "news": {
+        "deep_search_enabled": True,
+        "sentiment_enabled": True,
+        "sources": settings.deep_search_sources,
+        "refresh_minutes": 60,
+    }
+}
+
 
 class WeightReviewPipeline:
     """Review pipeline that recalculates orchestrator agent weights daily or on demand."""
@@ -41,12 +60,15 @@ class WeightReviewPipeline:
         await self._refresh_prompt()
         metrics = await self._collect_metrics()
         weights = self._compute_weights(metrics)
+        prompts, mcp_overrides = await self._update_prompts_and_mcp(metrics)
         snapshot = {
             "weights": weights,
             "generated_at": datetime.utcnow().isoformat(),
             "trigger": trigger,
             "metrics": metrics,
             "prompt": self.prompt,
+            "agent_prompts": prompts,
+            "mcp_overrides": mcp_overrides,
         }
         await self.redis.set_json(REDIS_REVIEW_KEY, snapshot, expire=settings.review_interval_hours * 3600)
         await self.redis.lpush(REDIS_REVIEW_HISTORY, json.dumps(snapshot))
@@ -147,6 +169,53 @@ class WeightReviewPipeline:
             first_key = next(iter(normalised))
             normalised[first_key] = round(normalised[first_key] + remainder, 4)
         return normalised
+
+    async def _update_prompts_and_mcp(self, metrics: Dict[str, float]) -> Tuple[Dict[str, str], Dict[str, Dict[str, object]]]:
+        """Refresh agent prompt guidance and MCP overrides based on latest metrics."""
+        dashboard = await self.redis.get_json(self.SETTINGS_KEY) or {}
+        agent_prompts: Dict[str, str] = dashboard.get("agent_prompts", {}).copy()
+
+        for agent_key, base_prompt in DEFAULT_AGENT_PROMPTS.items():
+            score = metrics.get(agent_key, 0.0)
+            agent_prompts[agent_key] = self._compose_agent_prompt(base_prompt, score)
+
+        mcp_overrides: Dict[str, Dict[str, object]] = dashboard.get("mcp_overrides", {}).copy()
+        news_settings = mcp_overrides.get("news", {}).copy()
+        news_score = metrics.get(AgentType.NEWS.value, 0.0)
+        news_settings["deep_search_enabled"] = news_score < 2 or news_settings.get("deep_search_enabled", True)
+        news_settings["sentiment_enabled"] = True
+        news_settings["sources"] = news_settings.get("sources") or settings.deep_search_sources
+        news_settings["refresh_minutes"] = self._derive_refresh_window(news_score)
+        mcp_overrides["news"] = news_settings
+
+        dashboard.update(
+            {
+                "agent_prompts": agent_prompts,
+                "mcp_overrides": mcp_overrides,
+                "last_review_update": datetime.utcnow().isoformat(),
+            }
+        )
+        dashboard.setdefault("review_prompt", self.prompt)
+        await self.redis.set_json(self.SETTINGS_KEY, dashboard)
+        return agent_prompts, mcp_overrides
+
+    @staticmethod
+    def _compose_agent_prompt(base_prompt: str, score: float) -> str:
+        if score < 1:
+            modifier = "Performance trending soft; tighten reasoning, demand extra validation, and call out data gaps."
+        elif score > 8:
+            modifier = "Performance strong; maintain current strategy but flag complacency risks."
+        else:
+            modifier = "Keep balanced perspective; reinforce collaboration with fusion agent."
+        return f"{base_prompt} {modifier}"
+
+    @staticmethod
+    def _derive_refresh_window(score: float) -> int:
+        if score < 1:
+            return 30
+        if score > 6:
+            return 120
+        return 60
 
 
 async def get_cached_weights(redis_client) -> Optional[Dict[str, float]]:

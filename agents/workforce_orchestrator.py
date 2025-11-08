@@ -332,7 +332,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
 
             result = await self._process_task_with_workforce(task)
             if result is None:
-                log.warning("[AI_DECISION] Workforce unavailable; skipping CAMEL processing for %s", ticker)
+                log.warning("[AI_DECISION] Workforce unavailable; skipping CAMEL processing for {}", ticker)
                 decision_metadata["steps"].append({
                     "step": "workforce_disabled",
                     "description": "Workforce processing skipped; using baseline heuristic outputs.",
@@ -418,7 +418,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
                     task = Task(content=task_description)
                     result = await self._process_task_with_workforce(task)
                     if result is None:
-                        log.debug("Workforce disabled; skipping automated analysis for %s", ticker)
+                        log.debug("Workforce disabled; skipping automated analysis for {}", ticker)
                         continue
 
                     log.info(f"Workforce cycle result for {ticker}: {result}")
@@ -438,7 +438,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
         try:
             plan = await self.redis.get_json("orchestrator:wallet_plan")
         except Exception as exc:  # pragma: no cover - defensive logging
-            log.debug("Unable to fetch wallet plan for workforce summary: %s", exc)
+            log.debug("Unable to fetch wallet plan for workforce summary: {}", exc)
             return
 
         if not plan:
@@ -495,7 +495,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
             log.bind(PORTFOLIO_PLAN=True).info("Wallet plan summary refreshed: {}", summary_payload)
             self._last_wallet_plan_timestamp = plan_id
         except Exception as exc:  # pragma: no cover - persistence failure
-            log.error("Failed to persist wallet plan summary: %s", exc)
+            log.error("Failed to persist wallet plan summary: {}", exc)
     
     async def stop(self):
         """Stop the orchestrator and cleanup."""
@@ -530,7 +530,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
         if not self.workforce or not self._workforce_available:
             return None
 
-        log.debug("[WORKFORCE] Processing task payload: %s", task.content[:200])
+        log.debug("[WORKFORCE] Processing task payload: {}", task.content[:200])
 
         try:
             processor = getattr(self.workforce, "process_task", None)
@@ -548,7 +548,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
             return None
 
         except Exception as exc:
-            log.error("Workforce processing error: %s", exc)
+            log.error("Workforce processing error: {}", exc)
             if self._should_disable_workforce(exc):
                 self._workforce_available = False
                 log.warning("Disabling workforce after repeated model failures. Falling back to rule-based orchestration.")

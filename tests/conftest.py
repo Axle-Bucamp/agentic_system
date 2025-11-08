@@ -132,6 +132,21 @@ async def patch_api_redis_client(fake_redis, monkeypatch):
     async def hdel(name, key):
         await fake_redis.hdel(name, key)
 
+    async def lpush(key, *values):
+        await fake_redis.lpush(key, *values)
+
+    async def rpush(key, value):
+        await fake_redis.rpush(key, value)
+
+    async def lrange(key, start, end):
+        return await fake_redis.lrange(key, start, end)
+
+    async def ltrim(key, start, end):
+        await fake_redis.ltrim(key, start, end)
+
+    async def exists(key):
+        return await fake_redis.exists(key)
+
     monkeypatch.setattr(api_main.redis_client, "get_json", get_json)
     monkeypatch.setattr(api_main.redis_client, "set_json", set_json)
     monkeypatch.setattr(api_main.redis_client, "set", set_)
@@ -140,6 +155,12 @@ async def patch_api_redis_client(fake_redis, monkeypatch):
     monkeypatch.setattr(api_main.redis_client, "hset", hset)
     monkeypatch.setattr(api_main.redis_client, "hgetall", hgetall)
     monkeypatch.setattr(api_main.redis_client, "hdel", hdel)
+    monkeypatch.setattr(api_main.redis_client, "lpush", lpush)
+    monkeypatch.setattr(api_main.redis_client, "rpush", rpush)
+    monkeypatch.setattr(api_main.redis_client, "lrange", lrange)
+    monkeypatch.setattr(api_main.redis_client, "ltrim", ltrim)
+    monkeypatch.setattr(api_main.redis_client, "exists", exists)
+    monkeypatch.setattr(api_main.redis_client, "redis", None)
     yield
 
 
