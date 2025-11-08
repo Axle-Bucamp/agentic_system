@@ -44,3 +44,131 @@ export interface WeightedNewsEntry {
   last_updated?: string;
 }
 
+export interface ChatEntry {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+}
+
+export interface FusionRecommendation {
+  ticker: string;
+  action: string;
+  confidence: number;
+  percent_allocation: number;
+  risk_level: string;
+  rationale?: string;
+  components?: Record<string, unknown>;
+  generated_at?: string;
+}
+
+export interface FusionRecommendationsResponse {
+  items: FusionRecommendation[];
+}
+
+export interface TrendAssessment {
+  ticker: string;
+  trend_score: number;
+  momentum: number;
+  volatility?: number | null;
+  recommended_action: string;
+  confidence: number;
+  supporting_signals?: Record<string, unknown>;
+  generated_at?: string;
+}
+
+export interface FactInsight {
+  ticker?: string | null;
+  sentiment_score: number;
+  confidence: number;
+  thesis: string;
+  references: Array<Record<string, unknown>>;
+  anomalies?: string[];
+  generated_at?: string;
+}
+
+export interface AgentStatusResponse {
+  copytrade: Record<string, unknown>;
+  trend: Array<{ ticker: string; generated_at?: string }>;
+  fact: Array<{ ticker: string; generated_at?: string }>;
+  fusion: Array<{ ticker: string; generated_at?: string; action?: string; confidence?: number }>;
+  logfire_enabled: boolean;
+}
+
+export interface GraphNode {
+  node_id: string;
+  label: string;
+  node_type: string;
+  weight: number;
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GraphEdge {
+  edge_id: string;
+  source: string;
+  target: string;
+  relation: string;
+  weight: number;
+  metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface GraphSnapshotResponse {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface LogResponse {
+  source: string;
+  path: string;
+  lines: string[];
+  logfire_enabled: boolean;
+}
+
+export interface DashboardSettings {
+  schedule_profile: string;
+  memory_prune_limit: number;
+  memory_prune_similarity_threshold: number;
+  review_interval_hours: number;
+  review_prompt: string;
+  observation_interval: string;
+  decision_interval: string;
+  forecast_interval: string;
+}
+
+export interface TradeRecord {
+  trade_id: string;
+  ticker: string;
+  action: string;
+  quantity: number;
+  executed_price?: number | null;
+  entry_price?: number | null;
+  evaluation_price?: number | null;
+  pnl?: number | null;
+  reward?: number | null;
+  status?: string | null;
+  confidence?: number | null;
+  timestamp?: string;
+  reward_evaluated_at?: string;
+}
+
+export interface AgentRewardSummary {
+  total_reward: number;
+  trades: number;
+  average_reward: number;
+}
+
+export interface AgentRewardResponse {
+  rewards: Record<string, AgentRewardSummary>;
+}
+
+export interface PortfolioTradesResponse {
+  trades: TradeRecord[];
+  count: number;
+  limit: number;
+  offset: number;
+  total: number;
+}
+

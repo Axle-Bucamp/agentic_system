@@ -138,9 +138,28 @@ services:
       - VLLM_ENDPOINT=${VLLM_ENDPOINT:-http://localhost:8002/v1}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-trading_memory}
       - OLLAMA_URL=http://ollama:11434
       - MEMORY_EMBEDDING_PROVIDER=ollama
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
       - BLOCKSCOUT_MCP_URL=http://blockscout-mcp:8080
+      - DEEP_SEARCH_API_URL=${DEEP_SEARCH_API_URL:-}
+      - DEEP_SEARCH_API_KEY=${DEEP_SEARCH_API_KEY:-}
+      - DEEP_SEARCH_SOURCES=${DEEP_SEARCH_SOURCES:-}
+      - ARXIV_ENABLED=${ARXIV_ENABLED:-true}
+      - MEMORY_CHAT_HISTORY_LIMIT=${MEMORY_CHAT_HISTORY_LIMIT:-100}
+      - MEMORY_RETRIEVE_LIMIT=${MEMORY_RETRIEVE_LIMIT:-3}
+      - MEMORY_TOKEN_LIMIT=${MEMORY_TOKEN_LIMIT:-4096}
+      - MEMORY_PRUNE_LIMIT=${MEMORY_PRUNE_LIMIT:-100}
+      - MEMORY_PRUNE_SIMILARITY_THRESHOLD=${MEMORY_PRUNE_SIMILARITY_THRESHOLD:-0.82}
+      - REVIEW_INTERVAL_HOURS=${REVIEW_INTERVAL_HOURS:-24}
+      - REVIEW_PROMPT_DEFAULT=${REVIEW_PROMPT_DEFAULT:-}
+      - CHAT_AGENT_MODEL=${CHAT_AGENT_MODEL:-}
+      - CHAT_AGENT_PROMPT=${CHAT_AGENT_PROMPT:-}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-trading-api}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - FAKE_TRADING=true
       - INITIAL_CAPITAL=1000.0
       - MAX_POSITION_SIZE=0.20
@@ -150,6 +169,7 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-change-in-production}
       - RATE_LIMIT_REDIS_URL=redis://redis:6379/1
       - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
@@ -179,6 +199,8 @@ services:
       args:
         AGENT_NAME: memory
     container_name: ats-memory-agent
+    env_file:
+      - .env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -187,7 +209,18 @@ services:
       - POSTGRES_DB=trading_system
       - POSTGRES_USER=trading_user
       - POSTGRES_PASSWORD=trading_pass_change_in_prod
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-trading_memory}
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
+      - MEMORY_PRUNE_LIMIT=${MEMORY_PRUNE_LIMIT:-100}
+      - MEMORY_PRUNE_SIMILARITY_THRESHOLD=${MEMORY_PRUNE_SIMILARITY_THRESHOLD:-0.82}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-memory-agent}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - AGENT_NAME=memory
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -212,6 +245,8 @@ services:
       - REDIS_PORT=6379
       - MCP_API_URL=https://forecasting.guidry-cloud.com
       - MCP_API_KEY=${MCP_API_KEY}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-dqn-agent}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - AGENT_NAME=dqn
     depends_on:
       redis:
@@ -228,10 +263,17 @@ services:
       args:
         AGENT_NAME: chart
     container_name: ats-chart-agent
+    env_file:
+      - .env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - MCP_API_URL=https://forecasting.guidry-cloud.com
+      - MCP_API_KEY=${MCP_API_KEY:-mock_api_key}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-chart-agent}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - AGENT_NAME=chart
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -247,6 +289,8 @@ services:
       args:
         AGENT_NAME: risk
     container_name: ats-risk-agent
+    env_file:
+      - .env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -256,9 +300,12 @@ services:
       - POSTGRES_USER=trading_user
       - POSTGRES_PASSWORD=trading_pass_change_in_prod
       - AGENT_NAME=risk
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-risk-agent}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - MAX_POSITION_SIZE=0.20
       - MAX_DAILY_LOSS=0.05
       - MAX_DRAWDOWN=0.15
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -284,6 +331,13 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - VLLM_ENDPOINT=${VLLM_ENDPOINT:-http://localhost:8002/v1}
       - AGENT_NAME=news
+      - DEEP_SEARCH_API_URL=${DEEP_SEARCH_API_URL:-}
+      - DEEP_SEARCH_API_KEY=${DEEP_SEARCH_API_KEY:-}
+      - DEEP_SEARCH_SOURCES=${DEEP_SEARCH_SOURCES:-}
+      - ARXIV_ENABLED=${ARXIV_ENABLED:-true}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-news-agent}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -299,6 +353,8 @@ services:
       args:
         AGENT_NAME: copytrade
     container_name: ats-copytrade-agent
+    env_file:
+      - .env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -311,6 +367,9 @@ services:
       - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed.binance.org/}
       - ETH_RPC_URL=${ETH_RPC_URL:-https://eth.llamarpc.com}
       - SOL_RPC_URL=${SOL_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-copytrade-agent}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -328,6 +387,8 @@ services:
       args:
         AGENT_NAME: orchestrator
     container_name: ats-orchestrator
+    env_file:
+      - .env
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -338,6 +399,21 @@ services:
       - POSTGRES_PASSWORD=trading_pass_change_in_prod
       - DEX_SIMULATOR_URL=http://dex-simulator:8000
       - AGENT_NAME=orchestrator
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-trading_memory}
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
+      - MEMORY_PRUNE_LIMIT=${MEMORY_PRUNE_LIMIT:-100}
+      - MEMORY_PRUNE_SIMILARITY_THRESHOLD=${MEMORY_PRUNE_SIMILARITY_THRESHOLD:-0.82}
+      - REVIEW_INTERVAL_HOURS=${REVIEW_INTERVAL_HOURS:-24}
+      - REVIEW_PROMPT_DEFAULT=${REVIEW_PROMPT_DEFAULT:-}
+      - CHAT_AGENT_MODEL=${CHAT_AGENT_MODEL:-}
+      - CHAT_AGENT_PROMPT=${CHAT_AGENT_PROMPT:-}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-orchestrator}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -382,15 +458,32 @@ services:
       - DEX_SIMULATOR_URL=http://dex-simulator:8000
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - QDRANT_COLLECTION_NAME=${QDRANT_COLLECTION_NAME:-trading_memory}
       - OLLAMA_URL=http://ollama:11434
       - MEMORY_EMBEDDING_PROVIDER=ollama
+      - NEO4J_URI=${NEO4J_URI:-}
+      - NEO4J_USER=${NEO4J_USER:-}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
       - BLOCKSCOUT_MCP_URL=http://blockscout-mcp:8080
       - MCP_API_URL=https://forecasting.guidry-cloud.com
       - MCP_API_KEY=${MCP_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - DEEP_SEARCH_API_URL=${DEEP_SEARCH_API_URL:-}
+      - DEEP_SEARCH_API_KEY=${DEEP_SEARCH_API_KEY:-}
+      - DEEP_SEARCH_SOURCES=${DEEP_SEARCH_SOURCES:-}
+      - ARXIV_ENABLED=${ARXIV_ENABLED:-true}
+      - MEMORY_PRUNE_LIMIT=${MEMORY_PRUNE_LIMIT:-100}
+      - MEMORY_PRUNE_SIMILARITY_THRESHOLD=${MEMORY_PRUNE_SIMILARITY_THRESHOLD:-0.82}
+      - REVIEW_INTERVAL_HOURS=${REVIEW_INTERVAL_HOURS:-24}
+      - REVIEW_PROMPT_DEFAULT=${REVIEW_PROMPT_DEFAULT:-}
+      - CHAT_AGENT_MODEL=${CHAT_AGENT_MODEL:-}
+      - CHAT_AGENT_PROMPT=${CHAT_AGENT_PROMPT:-}
+      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-workforce}
+      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - AGENT_NAME=workforce
       - FAKE_TRADING=true
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
         condition: service_healthy

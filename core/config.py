@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     qdrant_host: str = Field(default="localhost", env="QDRANT_HOST")
     qdrant_port: int = Field(default=6333, env="QDRANT_PORT")
     qdrant_collection_name: str = Field(default="trading_memory", env="QDRANT_COLLECTION_NAME")
+
+    # Neo4j Configuration
+    neo4j_uri: Optional[str] = Field(default=None, env="NEO4J_URI")
+    neo4j_user: Optional[str] = Field(default=None, env="NEO4J_USER")
+    neo4j_password: Optional[str] = Field(default=None, env="NEO4J_PASSWORD")
     
     # Memory Configuration
     memory_chat_history_limit: int = Field(default=100, env="MEMORY_CHAT_HISTORY_LIMIT")
@@ -78,6 +83,13 @@ class Settings(BaseSettings):
     memory_token_limit: int = Field(default=4096, env="MEMORY_TOKEN_LIMIT")
     memory_embedding_model: str = Field(default="nomic-embed-text", env="MEMORY_EMBEDDING_MODEL")
     memory_embedding_provider: str = Field(default="ollama", env="MEMORY_EMBEDDING_PROVIDER")  # "ollama" or "openai"
+    memory_prune_limit: int = Field(default=100, env="MEMORY_PRUNE_LIMIT")
+    memory_prune_similarity_threshold: float = Field(default=0.82, env="MEMORY_PRUNE_SIMILARITY_THRESHOLD")
+    review_interval_hours: int = Field(default=24, env="REVIEW_INTERVAL_HOURS")
+    review_prompt_default: str = Field(
+        default="Review recent agent performance, adjust coordination weights to maximize risk-adjusted returns, and surface rationale for any changes. Keep weights normalized to 1.0.",
+        env="REVIEW_PROMPT_DEFAULT",
+    )
     
     # Ollama Configuration
     ollama_url: str = Field(default="http://ollama:11434", env="OLLAMA_URL")
@@ -95,6 +107,24 @@ class Settings(BaseSettings):
     max_drawdown: float = Field(default=0.15, env="MAX_DRAWDOWN")  # 15% max drawdown
     trading_fee: float = Field(default=0.001, env="TRADING_FEE")  # 0.1% trading fee
     min_confidence: float = Field(default=0.7, env="MIN_CONFIDENCE")  # Minimum confidence for DQN trades
+    trade_reward_window_seconds: int = Field(default=3600, env="TRADE_REWARD_WINDOW_SECONDS")
+    trade_reward_min_confidence: float = Field(default=0.55, env="TRADE_REWARD_MIN_CONFIDENCE")
+    trade_reward_max_pending: int = Field(default=500, env="TRADE_REWARD_MAX_PENDING")
+    trade_reward_price_source: str = Field(default="chart", env="TRADE_REWARD_PRICE_SOURCE")
+    deep_search_api_url: Optional[str] = Field(default=None, env="DEEP_SEARCH_API_URL")
+    deep_search_api_key: Optional[str] = Field(default=None, env="DEEP_SEARCH_API_KEY")
+    deep_search_sources: List[str] = Field(
+        default_factory=lambda: ["coindesk", "cointelegraph", "decrypt"],
+        env="DEEP_SEARCH_SOURCES",
+    )
+    arxiv_enabled: bool = Field(default=True, env="ARXIV_ENABLED")
+    agent_instance_id: str = Field(
+        default_factory=lambda: os.getenv("AGENT_INSTANCE_ID")
+        or os.getenv("HOSTNAME")
+        or "agent-instance-1",
+        env="AGENT_INSTANCE_ID",
+    )
+    cluster_name: str = Field(default="local-cluster", env="CLUSTER_NAME")
     
     # Supported Assets
     supported_assets: List[str] = [
@@ -157,6 +187,7 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     log_file: str = Field(default="/app/logs/trading_system.log", env="LOG_FILE")
+    logfire_token: Optional[str] = Field(default=None, env="LOGFIRE_TOKEN")
 
     @model_validator(mode="before")
     @classmethod
@@ -182,6 +213,7 @@ class Settings(BaseSettings):
             "ollama_url",
             "mcp_api_url",
             "dex_simulator_url",
+            "deep_search_api_url",
         }
 
         for field_name in numeric_fields:
@@ -193,6 +225,13 @@ class Settings(BaseSettings):
             value = data.get(field_name)
             if isinstance(value, str) and not value.strip():
                 data.pop(field_name, None)
+
+        deep_sources = data.get("deep_search_sources")
+        if isinstance(deep_sources, str):
+            try:
+                data["deep_search_sources"] = [item.strip() for item in deep_sources.split(",") if item.strip()]
+            except Exception:
+                data.pop("deep_search_sources", None)
 
         return data
     
@@ -210,6 +249,11 @@ class Settings(BaseSettings):
     def qdrant_url(self) -> str:
         """Construct Qdrant URL."""
         return f"http://{self.qdrant_host}:{self.qdrant_port}"
+
+    @property
+    def neo4j_enabled(self) -> bool:
+        """Determine whether Neo4j integration is configured."""
+        return all([self.neo4j_uri, self.neo4j_user, self.neo4j_password])
     
     def get_asset_tier(self, asset: str) -> int:
         """Get the risk tier for an asset."""

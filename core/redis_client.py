@@ -151,6 +151,13 @@ class RedisClient:
         except Exception as e:
             log.error(f"Redis HGETALL error for {name}: {e}")
             return {}
+
+    async def hdel(self, name: str, *keys: str):
+        """Delete hash fields."""
+        try:
+            await self.redis.hdel(name, *keys)
+        except Exception as e:
+            log.error(f"Redis HDEL error for {name}:{keys}: {e}")
     
     async def lpush(self, key: str, *values: str):
         """Push values to list (left)."""

@@ -92,6 +92,12 @@ class DQNAgent(BaseAgent):
                 },
                 reasoning=aggregated["reasoning"]
             )
+            log.bind(agent="DQN", instance=settings.agent_instance_id).info(
+                "DQN aggregated decision for %s: %s (confidence=%.2f)",
+                ticker,
+                aggregated["action"].value if isinstance(aggregated["action"], TradeAction) else aggregated["action"],
+                aggregated["confidence"],
+            )
             
             await self.send_signal(signal.dict())
             

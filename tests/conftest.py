@@ -1,18 +1,146 @@
 """
 Pytest configuration and shared fixtures.
 """
+import json
+from collections import defaultdict
 import asyncio
 import pytest
-from typing import Dict, Any, AsyncGenerator
+import pytest_asyncio
+from typing import Dict, Any, AsyncGenerator, List
 from unittest.mock import AsyncMock, MagicMock
 from datetime import datetime, timedelta
-import fakeredis
-import httpx
-from core.exchange_interface import ExchangeType, OrderSide, OrderType, OrderStatus, Balance, Ticker, Order
-from core.exchange_manager import ExchangeManager
 from core.forecasting_client import ForecastingClient
+import httpx
+
+try:
+    import fakeredis  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    fakeredis = None
+from core.exchange_interface import (
+    ExchangeType,
+    OrderSide,
+    OrderType,
+    OrderStatus,
+    Balance,
+    Ticker,
+    Order,
+)
+from core.exchange_manager import ExchangeManager
 from core.redis_client import RedisClient
-from core.config import Settings
+
+
+class FakeRedis:
+    def __init__(self):
+        self._store: Dict[str, Any] = {}
+        self._lists: Dict[str, List[str]] = defaultdict(list)
+
+    async def get_json(self, key: str):
+        value = self._store.get(key)
+        if value is None:
+            return None
+        return json.loads(json.dumps(value))
+
+    async def set_json(self, key: str, value, expire: int | None = None):
+        self._store[key] = json.loads(json.dumps(value))
+
+    async def lpush(self, key: str, *values: str):
+        for value in values:
+            self._lists[key].insert(0, value)
+
+    async def rpush(self, key: str, value: str):
+        self._lists[key].append(value)
+
+    async def ltrim(self, key: str, start: int, end: int):
+        if end == -1:
+            trimmed = self._lists[key][start:]
+        else:
+            trimmed = self._lists[key][start : end + 1]
+        self._lists[key] = trimmed
+
+    async def lrange(self, key: str, start: int, end: int):
+        if end == -1:
+            end = None
+        else:
+            end += 1
+        return self._lists[key][start:end]
+
+    async def delete(self, key: str):
+        self._store.pop(key, None)
+        self._lists.pop(key, None)
+
+    async def set(self, key: str, value: str, expire: int | None = None):
+        self._store[key] = value
+
+    async def get(self, key: str):
+        return self._store.get(key)
+
+    async def exists(self, key: str) -> bool:
+        return key in self._store or key in self._lists
+
+    async def ping(self):
+        return True
+
+    async def hset(self, name: str, key: str, value: str):
+        bucket = self._store.setdefault(name, {})
+        if not isinstance(bucket, dict):
+            bucket = {}
+        bucket[key] = value
+        self._store[name] = bucket
+
+    async def hgetall(self, name: str):
+        bucket = self._store.get(name, {})
+        if isinstance(bucket, dict):
+            return bucket.copy()
+        return {}
+
+    async def hdel(self, name: str, key: str):
+        bucket = self._store.get(name)
+        if isinstance(bucket, dict):
+            bucket.pop(key, None)
+
+
+@pytest_asyncio.fixture
+async def fake_redis():
+    return FakeRedis()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def patch_api_redis_client(fake_redis, monkeypatch):
+    from api import main as api_main
+
+    async def get_json(key, *_args, **_kwargs):
+        return await fake_redis.get_json(key)
+
+    async def set_json(key, value, expire=None):
+        await fake_redis.set_json(key, value, expire)
+
+    async def set_(key, value, expire=None):
+        await fake_redis.set(key, value, expire)
+
+    async def get_(key, *_args, **_kwargs):
+        return await fake_redis.get(key)
+
+    async def delete(key):
+        await fake_redis.delete(key)
+
+    async def hset(name, key, value):
+        await fake_redis.hset(name, key, value)
+
+    async def hgetall(name):
+        return await fake_redis.hgetall(name)
+
+    async def hdel(name, key):
+        await fake_redis.hdel(name, key)
+
+    monkeypatch.setattr(api_main.redis_client, "get_json", get_json)
+    monkeypatch.setattr(api_main.redis_client, "set_json", set_json)
+    monkeypatch.setattr(api_main.redis_client, "set", set_)
+    monkeypatch.setattr(api_main.redis_client, "get", get_)
+    monkeypatch.setattr(api_main.redis_client, "delete", delete)
+    monkeypatch.setattr(api_main.redis_client, "hset", hset)
+    monkeypatch.setattr(api_main.redis_client, "hgetall", hgetall)
+    monkeypatch.setattr(api_main.redis_client, "hdel", hdel)
+    yield
 
 
 @pytest.fixture(scope="session")
@@ -26,35 +154,11 @@ def event_loop():
 @pytest.fixture
 async def mock_redis() -> AsyncGenerator[RedisClient, None]:
     """Create a mock Redis client for testing."""
+    if fakeredis is None:
+        pytest.skip("fakeredis is required for mock_redis fixture")
     redis_client = RedisClient()
     redis_client.redis = fakeredis.FakeAsyncRedis()
-    await redis_client.connect()
     yield redis_client
-    await redis_client.disconnect()
-
-
-@pytest.fixture
-def mock_settings() -> Settings:
-    """Create mock settings for testing."""
-    return Settings(
-        redis_host="localhost",
-        redis_port=6379,
-        redis_db=0,
-        postgres_host="localhost",
-        postgres_port=5432,
-        postgres_db="test_trading_system",
-        postgres_user="test_user",
-        postgres_password="test_pass",
-        mcp_api_url="https://forecasting.guidry-cloud.com",
-        initial_capital=10000.0,
-        max_position_size=0.20,
-        max_daily_loss=0.05,
-        max_drawdown=0.15,
-        trading_fee=0.001,
-        min_confidence=0.7,
-        supported_assets=["BTC", "ETH", "SOL", "ADA", "DOT"],
-        environment="test"
-    )
 
 
 @pytest.fixture

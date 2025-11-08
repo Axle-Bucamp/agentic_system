@@ -348,6 +348,40 @@ class ForecastingClient:
         self._set_cache(cache_key, result, timedelta(hours=1))  # Cache for 1 hour
         return result
     
+    async def get_ohlc(self, ticker: str, interval: str, limit: int = 120) -> List[Dict[str, Any]]:
+        """Fetch OHLC candles for a ticker/interval."""
+        cache_key = f"ohlc_{ticker}_{interval}_{limit}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        if self.is_mock:
+            if self.mock_service:
+                candles = await self.mock_service.get_ohlc(ticker, interval, limit=limit)
+            else:
+                candles = [
+                    {
+                        "timestamp": (datetime.utcnow() - timedelta(minutes=limit - i)).isoformat(),
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.5,
+                        "close": 100.5,
+                        "volume": 1_000_000,
+                    }
+                    for i in range(limit)
+                ]
+        else:
+            params = {"limit": limit}
+            try:
+                response = await self._make_request("GET", f"/api/json/ohlc/{interval}/{ticker}", params=params)
+                candles = response.get("ohlc", response if isinstance(response, list) else [])
+            except Exception as e:
+                log.error("Failed to fetch OHLC for %s/%s: %s", ticker, interval, e)
+                raise ForecastingAPIError(f"Failed to fetch OHLC data: {e}")
+
+        self._set_cache(cache_key, candles, timedelta(minutes=2))
+        return candles
+    
     async def get_available_intervals(self) -> List[str]:
         """Get list of available intervals."""
         cache_key = "available_intervals"

@@ -146,6 +146,36 @@ class MockForecastingService:
             raise Exception("Rate limit exceeded")
         
         return self.tickers.copy()
+
+    async def get_ohlc(
+        self,
+        ticker: str,
+        interval: str = "hours",
+        limit: int = 120,
+    ) -> List[Dict[str, Any]]:
+        """Return mock OHLC candles."""
+        await self._simulate_api_delay()
+
+        if not await self._check_rate_limit():
+            raise Exception("Rate limit exceeded")
+
+        if ticker not in self.historical_data:
+            raise Exception(f"Ticker {ticker} not found")
+
+        historical = self.historical_data[ticker][-limit:]
+        candles: List[Dict[str, Any]] = []
+        for entry in historical:
+            candles.append(
+                {
+                    "timestamp": entry["timestamp"],
+                    "open": entry["price"] * 0.99,
+                    "high": entry["high"],
+                    "low": entry["low"],
+                    "close": entry["price"],
+                    "volume": entry["volume"],
+                }
+            )
+        return candles
     
     async def get_stock_forecast(
         self, 

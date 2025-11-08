@@ -80,6 +80,9 @@ if _models_py_path.exists():
         NewsMemoryEntry = _models_py.NewsMemoryEntry
     else:
         NewsMemoryEntry = None
+    TrendAssessment = getattr(_models_py, 'TrendAssessment', None)
+    FactInsight = getattr(_models_py, 'FactInsight', None)
+    FusionRecommendation = getattr(_models_py, 'FusionRecommendation', None)
     # ExchangeType is in exchange_interface, not models.py
     try:
         from core.exchange_interface import ExchangeType
@@ -129,4 +132,10 @@ if 'TradeMemoryEntry' in globals() and TradeMemoryEntry is not None:
     __all__.append("TradeMemoryEntry")
 if 'NewsMemoryEntry' in globals() and NewsMemoryEntry is not None:
     __all__.append("NewsMemoryEntry")
+if 'TrendAssessment' in globals() and TrendAssessment is not None:
+    __all__.append("TrendAssessment")
+if 'FactInsight' in globals() and FactInsight is not None:
+    __all__.append("FactInsight")
+if 'FusionRecommendation' in globals() and FusionRecommendation is not None:
+    __all__.append("FusionRecommendation")
 

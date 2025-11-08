@@ -208,3 +208,243 @@ body {
   font-size: 0.9rem;
 }
 
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.chat-history {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-right: 0.5rem;
+}
+
+.chat-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  background-color: rgba(15, 23, 42, 0.6);
+  border-radius: 12px;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.08);
+}
+
+.chat-entry.assistant {
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.chat-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.chat-role {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.chat-content {
+  white-space: pre-wrap;
+  line-height: 1.4;
+  font-size: 0.9rem;
+}
+
+.chat-input {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.chat-input input {
+  flex: 1;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background-color: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  padding: 0.6rem 0.75rem;
+}
+
+.chat-input button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.agent-monitor {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.agent-controls {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.agent-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.agent-controls select {
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background-color: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  padding: 0.5rem 0.6rem;
+}
+
+.detail-card {
+  background-color: rgba(15, 23, 42, 0.65);
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.detail-json {
+  max-height: 160px;
+  overflow-y: auto;
+  background-color: rgba(15, 23, 42, 0.55);
+  border-radius: 10px;
+  padding: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.1);
+  font-size: 0.75rem;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.settings-grid label,
+.settings-textarea {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.settings-grid input,
+.settings-grid select,
+.settings-textarea textarea {
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background-color: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  padding: 0.55rem 0.65rem;
+}
+
+.settings-textarea textarea {
+  resize: vertical;
+}
+
+.settings-forecast {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.settings-forecast h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #93c5fd;
+}
+
+.ticker-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.ticker-cloud span {
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  background-color: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  color: #cbd5f5;
+}
+
+.pipeline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.log-controls select {
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background-color: rgba(15, 23, 42, 0.7);
+  color: #e2e8f0;
+  padding: 0.45rem 0.6rem;
+}
+
+.trades-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.trades-table th,
+.trades-table td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.trades-table tr:hover {
+  background: rgba(148, 163, 184, 0.05);
+}
+
+.positive {
+  color: #34d399;
+}
+
+.negative {
+  color: #f87171;
+}
+
+.rewards-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.reward-card {
+  padding: 0.75rem;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+}
+
+.reward-card .reward-title {
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+

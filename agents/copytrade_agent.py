@@ -58,6 +58,11 @@ class CopyTradeAgent(BaseAgent):
         log.debug("Copy Trade Agent running cycle...")
         
         try:
+            if not await self._is_enabled():
+                log.debug("Copy Trade Agent is disabled via toggle; skipping cycle.")
+                await self._publish_wallet_scores()
+                return
+
             # Monitor tracked wallets
             for wallet_info in self.tracked_wallets:
                 await self._monitor_wallet(wallet_info)
@@ -435,4 +440,24 @@ class CopyTradeAgent(BaseAgent):
             
         except Exception as e:
             log.error(f"Error discovering wallets: {e}")
+
+    async def _is_enabled(self) -> bool:
+        """Check whether copy trading is enabled via UI toggle."""
+        try:
+            raw = await self.redis.get("copytrade:enabled")
+            if raw is None:
+                await self.redis.set("copytrade:enabled", "1")
+                await self.redis.set_json(
+                    "copytrade:status",
+                    {"enabled": True, "updated_at": datetime.utcnow().isoformat()},
+                )
+                return True
+            enabled = raw != "0"
+            await self.redis.set_json(
+                "copytrade:status",
+                {"enabled": enabled, "updated_at": datetime.utcnow().isoformat()},
+            )
+            return enabled
+        except Exception:
+            return True
 

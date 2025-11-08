@@ -23,6 +23,9 @@ class SignalType(str, Enum):
     RISK_ALERT = "RISK_ALERT"
     COPY_TRADE = "COPY_TRADE"
     MEMORY_INSIGHT = "MEMORY_INSIGHT"
+    TREND_ASSESSMENT = "TREND_ASSESSMENT"
+    FACT_SUMMARY = "FACT_SUMMARY"
+    FUSION_DECISION = "FUSION_DECISION"
 
 
 class AgentType(str, Enum):
@@ -33,6 +36,9 @@ class AgentType(str, Enum):
     RISK = "RISK"
     NEWS = "NEWS"
     COPYTRADE = "COPYTRADE"
+    TREND = "TREND"
+    FACT = "FACT"
+    FUSION = "FUSION"
     ORCHESTRATOR = "ORCHESTRATOR"
 
 
@@ -277,4 +283,41 @@ class GraphMemoryEdge(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TrendAssessment(BaseModel):
+    """Aggregated trend assessment derived from DQN and technical analysis pipelines."""
+    ticker: str
+    trend_score: float  # 0-1 composite score
+    momentum: float  # 0-1 momentum strength
+    volatility: Optional[float] = None
+    recommended_action: TradeAction
+    confidence: float
+    supporting_signals: Dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class FactInsight(BaseModel):
+    """Fundamental/news insight combining deep research, sentiment, and external knowledge."""
+    ticker: Optional[str] = None
+    sentiment_score: float
+    confidence: float
+    thesis: str
+    references: List[Dict[str, Any]] = Field(default_factory=list)
+    anomalies: List[str] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class FusionRecommendation(BaseModel):
+    """Fusion layer recommendation that fuses trend, fact, risk, and copytrade signals."""
+    ticker: str
+    action: TradeAction
+    confidence: float
+    percent_allocation: float
+    stop_loss_upper: float
+    stop_loss_lower: float
+    risk_level: str
+    rationale: str
+    components: Dict[str, Any] = Field(default_factory=dict)
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
 

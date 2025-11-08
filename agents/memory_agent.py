@@ -9,9 +9,11 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from agents.base_agent import BaseAgent
+from core import asset_registry
 from core.config import settings
 from core.logging import log
 from core.memory.graph_memory import GraphMemoryManager
+from core.memory.neo4j_client import get_neo4j_client
 from core.models import (
     AgentMessage,
     AgentType,
@@ -22,6 +24,9 @@ from core.models import (
     TradeAction,
     TradeMemoryEntry,
 )
+from core.pipelines import MemoryPruningPipeline, WeightReviewPipeline
+
+PENDING_REWARD_KEY = "memory:pending_trade_rewards"
 
 
 class MemoryAgent(BaseAgent):
@@ -35,10 +40,31 @@ class MemoryAgent(BaseAgent):
         self.news_memory_limit = 500
         self.news_half_life_hours = 12
         self.graph_memory = GraphMemoryManager(redis_client)
+        self.neo4j_client = None
+        self.auto_enhance_ttl_seconds = 900
+        self.camel_memory = None
+        self.reward_history_limit = 500
+        self.pruning_pipeline: Optional[MemoryPruningPipeline] = None
+        self.weight_review_pipeline: Optional[WeightReviewPipeline] = None
+        self._last_review_run: datetime = datetime.min
 
     async def initialize(self):
         """Initialize memory subsystems."""
         log.info("Memory Agent initialized")
+        self.neo4j_client = await get_neo4j_client()
+        if self.neo4j_client:
+            self.graph_memory.neo4j_client = self.neo4j_client
+            log.info("Neo4j graph mirror enabled")
+        try:
+            from core.memory.camel_memory_manager import CamelMemoryManager  # pylint: disable=import-error
+
+            self.camel_memory = CamelMemoryManager(agent_id="memory_agent_auto")
+            log.info("Qdrant vector memory enabled for auto-enhancement")
+        except Exception as exc:  # pragma: no cover - optional dependency
+            log.debug("Camel/Qdrant memory unavailable: %s", exc)
+            self.camel_memory = None
+        self.pruning_pipeline = MemoryPruningPipeline(self.redis, camel_memory=self.camel_memory)
+        self.weight_review_pipeline = WeightReviewPipeline(self.redis, camel_memory=self.camel_memory)
         await self._initialize_performance_tracking()
 
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
@@ -62,12 +88,22 @@ class MemoryAgent(BaseAgent):
         log.debug("Memory Agent running cycle...")
 
         try:
+            await self._evaluate_trade_rewards()
             await self._update_performance_metrics()
             await self._analyze_patterns()
             await self._refresh_news_weights()
             await self._cleanup_old_data()
+            await self._auto_enhance_long_term_memory()
+            await self._prune_memories_if_needed()
+            await self._run_weight_review_if_due()
         except Exception as exc:
             log.error("Memory Agent cycle error: %s", exc)
+
+    async def stop(self):
+        if self.neo4j_client:
+            await self.neo4j_client.close()
+            self.neo4j_client = None
+        await super().stop()
 
     async def _initialize_performance_tracking(self):
         metrics = await self.redis.get_json("memory:performance")
@@ -123,14 +159,219 @@ class MemoryAgent(BaseAgent):
             timestamp=trade_timestamp,
         )
 
-        await self.redis.rpush("memory:trades", entry.json())
+        snapshot = self._build_trade_snapshot(entry, trade_data)
+
+        await self.redis.set_json(f"memory:trade:{trade_id}", snapshot)
+
+        await self.redis.rpush("memory:trades", json.dumps({"trade_id": trade_id}))
         await self.redis.ltrim("memory:trades", -self.trade_tape_limit, -1)
 
-        await self.redis.rpush(f"memory:trades:{ticker}", entry.json())
+        await self.redis.rpush(f"memory:trades:{ticker}", json.dumps({"trade_id": trade_id}))
         await self.redis.ltrim(f"memory:trades:{ticker}", -self.ticker_trade_limit, -1)
 
         await self._record_trade_in_graph(entry)
         log.info("Recorded trade: %s %s @ %.4f", ticker, action.value, price)
+
+    def _build_trade_snapshot(self, entry: TradeMemoryEntry, trade_data: Dict[str, Any]) -> Dict[str, Any]:
+        decision = trade_data.get("decision")
+        snapshot = {
+            "trade_id": entry.trade_id,
+            "ticker": entry.ticker,
+            "action": entry.action.value,
+            "quantity": entry.quantity,
+            "executed_price": entry.price,
+            "entry_price": entry.price,
+            "pnl": entry.pnl,
+            "status": entry.status,
+            "confidence": trade_data.get("confidence")
+            or (decision or {}).get("confidence"),
+            "timestamp": entry.timestamp.isoformat(),
+            "decision": decision,
+            "fusion": trade_data.get("fusion"),
+            "trend": trade_data.get("trend"),
+            "fact": trade_data.get("fact"),
+            "reward_due_at": trade_data.get("reward_due_at"),
+            "reward_window_seconds": trade_data.get("reward_window_seconds"),
+            "portfolio_snapshot": trade_data.get("portfolio_snapshot"),
+            "metadata": entry.metadata,
+        }
+        return snapshot
+
+    async def _evaluate_trade_rewards(self):
+        pending = await self.redis.hgetall(PENDING_REWARD_KEY)
+        if not pending:
+            return
+
+        if len(pending) > settings.trade_reward_max_pending:
+            overflow = len(pending) - settings.trade_reward_max_pending
+            for trade_id in list(pending.keys())[:overflow]:
+                await self.redis.hdel(PENDING_REWARD_KEY, trade_id)
+                log.bind(agent="MEMORY").warning(
+                    "Pruned stale pending reward %s to respect cap", trade_id
+                )
+                pending.pop(trade_id, None)
+
+        now = datetime.utcnow()
+        evaluated = 0
+
+        for trade_id, raw in pending.items():
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                await self.redis.hdel(PENDING_REWARD_KEY, trade_id)
+                continue
+
+            confidence = self._safe_float(payload.get("confidence"), 0.0) or 0.0
+            if confidence < settings.trade_reward_min_confidence:
+                await self.redis.hdel(PENDING_REWARD_KEY, trade_id)
+                continue
+
+            due_at = self._parse_timestamp(payload.get("reward_due_at"))
+            if due_at > now:
+                continue
+
+            ticker = payload.get("ticker")
+            if not ticker:
+                await self.redis.hdel(PENDING_REWARD_KEY, trade_id)
+                continue
+
+            evaluation_price = await self._resolve_current_price(ticker)
+            if evaluation_price is None:
+                # Retry later
+                continue
+
+            entry_price = self._safe_float(
+                payload.get("entry_price") or payload.get("executed_price")
+            )
+            quantity = self._safe_float(payload.get("quantity"))
+            action = self._normalize_action(payload.get("action"))
+
+            if entry_price <= 0 or quantity <= 0:
+                pnl = 0.0
+                reward = 0.0
+            else:
+                direction = 1.0 if action == TradeAction.BUY else -1.0
+                price_delta = (evaluation_price - entry_price) * direction
+                pnl = price_delta * quantity
+                reward = (price_delta / entry_price) if entry_price else 0.0
+
+            payload.setdefault("metadata", {})
+            payload.update(
+                {
+                    "evaluation_price": evaluation_price,
+                    "pnl": pnl,
+                    "reward": reward,
+                    "status": self._determine_trade_status(pnl),
+                    "reward_evaluated_at": now.isoformat(),
+                }
+            )
+
+            await self._persist_trade_reward(trade_id, payload)
+            await self.redis.hdel(PENDING_REWARD_KEY, trade_id)
+            evaluated += 1
+
+        if evaluated:
+            log.info("Evaluated %d pending trade rewards", evaluated)
+
+    async def _resolve_current_price(self, ticker: str) -> Optional[float]:
+        if settings.trade_reward_price_source.lower() in {"chart", "auto"}:
+            chart_payload = await self.redis.get_json(f"chart:signal:{ticker}")
+            if chart_payload:
+                data = chart_payload.get("data") or {}
+                price = self._safe_float(data.get("current_price"))
+                if price > 0:
+                    return price
+
+        portfolio = await self.redis.get_json("state:portfolio")
+        if portfolio:
+            price = self._safe_float(
+                (portfolio.get("prices") or {}).get(ticker)
+            )
+            if price > 0:
+                return price
+
+        if settings.trade_reward_price_source.lower() in {"dqn", "auto"}:
+            dqn_payload = await self.redis.get_json(f"dqn:prediction:{ticker}")
+            if dqn_payload:
+                data = dqn_payload.get("data") or {}
+                price = self._safe_float(data.get("forecast_price"))
+                if price > 0:
+                    return price
+
+        return None
+
+    async def _persist_trade_reward(self, trade_id: str, payload: Dict[str, Any]):
+        await self.redis.set_json(f"memory:trade:{trade_id}", payload)
+        record = json.dumps(
+            {
+                "trade_id": trade_id,
+                "ticker": payload.get("ticker"),
+                "pnl": payload.get("pnl"),
+                "reward": payload.get("reward"),
+                "status": payload.get("status"),
+                "timestamp": payload.get("reward_evaluated_at"),
+            }
+        )
+        await self.redis.lpush("memory:trade_rewards", record)
+        await self.redis.ltrim("memory:trade_rewards", 0, self.reward_history_limit - 1)
+
+        entry = TradeMemoryEntry(
+            trade_id=payload.get("trade_id", trade_id),
+            ticker=payload.get("ticker", "UNKNOWN"),
+            action=self._normalize_action(payload.get("action", "HOLD")),
+            quantity=self._safe_float(payload.get("quantity")),
+            price=self._safe_float(
+                payload.get("executed_price")
+                or payload.get("entry_price")
+                or payload.get("price")
+            ),
+            pnl=self._extract_pnl(payload),
+            status=payload.get("status", "UNKNOWN"),
+            metadata=payload.get("metadata", {}),
+            timestamp=self._parse_timestamp(payload.get("timestamp")),
+        )
+        await self._record_trade_in_graph(entry)
+        await self._update_agent_rewards(payload, payload.get("reward", 0.0))
+
+    async def _update_agent_rewards(self, payload: Dict[str, Any], reward: float):
+        decision = payload.get("decision") or {}
+        signals = decision.get("contributing_signals") or []
+        if not signals:
+            return
+
+        rewards = await self.redis.get_json("memory:agent_rewards") or {}
+
+        confidences = [
+            self._safe_float(signal.get("confidence"), 0.0) for signal in signals
+        ]
+        total_conf = sum(confidences) if any(confidences) else float(len(signals) or 1)
+
+        for signal, confidence in zip(signals, confidences or [1.0] * len(signals)):
+            agent_key = self._normalize_agent_key(signal.get("agent_type"))
+            if not agent_key:
+                continue
+            weight = confidence / total_conf if total_conf else 0.0
+            agent_reward = reward * weight
+            stats = rewards.get(agent_key, {"total_reward": 0.0, "trades": 0})
+            stats["total_reward"] += agent_reward
+            stats["trades"] += 1
+            stats["average_reward"] = (
+                stats["total_reward"] / stats["trades"] if stats["trades"] else 0.0
+            )
+            rewards[agent_key] = stats
+
+        await self.redis.set_json("memory:agent_rewards", rewards)
+
+    def _normalize_agent_key(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            candidate = value.get("value") or value.get("name")
+        else:
+            candidate = str(value)
+        if not candidate:
+            return ""
+        return candidate.upper()
 
     async def _record_signal(self, signal_data: Dict[str, Any]):
         record = {
@@ -203,7 +444,7 @@ class MemoryAgent(BaseAgent):
 
         trades: List[TradeMemoryEntry] = []
         for raw in trades_raw:
-            entry = self._parse_trade_entry(raw)
+            entry = await self._parse_trade_entry(raw)
             if entry:
                 trades.append(entry)
 
@@ -273,7 +514,9 @@ class MemoryAgent(BaseAgent):
 
         ticker_performance: Dict[str, Dict[str, float]] = {}
         for raw in trades_raw:
-            entry = self._parse_trade_entry(raw)
+            entry = await self._parse_trade_entry(raw)
+        for raw in trades_raw:
+            entry = await self._parse_trade_entry(raw)
             if not entry:
                 continue
             pnl = entry.pnl or 0.0
@@ -309,6 +552,107 @@ class MemoryAgent(BaseAgent):
     async def _cleanup_old_data(self):
         # FIFO retention keeps the tape compact; nothing extra required today.
         log.debug("Memory cleanup pass completed")
+
+    async def _auto_enhance_long_term_memory(self):
+        """Promote recent fusion recommendations into long-term graph memory."""
+        try:
+            for ticker in asset_registry.get_assets():
+                fusion = await self.redis.get_json(f"pipeline:fusion:{ticker}")
+                if not fusion:
+                    continue
+
+                fusion_id = fusion.get("generated_at")
+                if not fusion_id:
+                    continue
+
+                cache_key = f"memory:auto_enhanced:{ticker}:{fusion_id}"
+                if await self.redis.exists(cache_key):
+                    continue
+
+                action = fusion.get("action", "HOLD")
+                confidence = float(fusion.get("confidence", 0.0))
+                allocation = float(fusion.get("percent_allocation", 0.0))
+                rationale = fusion.get("rationale", "")
+                summary_text = (
+                    f"{ticker} fusion decision: {action} with confidence {confidence:.2f} "
+                    f"and allocation {allocation:.2%}. {rationale}"
+                )
+
+                node = GraphMemoryNode(
+                    node_id=f"fusion:{ticker}:{fusion_id}",
+                    label=f"{ticker} fusion insight",
+                    node_type="fusion_insight",
+                    weight=max(confidence, 0.1),
+                    metadata={
+                        "ticker": ticker,
+                        "action": action,
+                        "confidence": confidence,
+                        "allocation": allocation,
+                        "rationale": rationale,
+                        "components": fusion.get("components", {}),
+                    },
+                )
+                await self.graph_memory.upsert_node(node)
+
+                asset_node = GraphMemoryNode(
+                    node_id=f"asset:{ticker}",
+                    label=ticker,
+                    node_type="asset",
+                    weight=1.0,
+                )
+                await self.graph_memory.upsert_node(asset_node)
+                await self.graph_memory.connect(node.node_id, asset_node.node_id, "RELATES", weight=node.weight)
+
+                if self.camel_memory:
+                    try:
+                        from camel.messages import BaseMessage  # pylint: disable=import-error
+                        from camel.types import OpenAIBackendRole  # pylint: disable=import-error
+
+                        message = BaseMessage.make_assistant_message(
+                            role_name="Fusion Insight",
+                            content=summary_text,
+                        )
+                        self.camel_memory.write_record(
+                            message,
+                            role=OpenAIBackendRole.ASSISTANT,
+                            extra_info={
+                                "ticker": ticker,
+                                "confidence": confidence,
+                                "allocation": allocation,
+                            },
+                        )
+                    except Exception as embed_exc:  # pragma: no cover - optional dependency
+                        log.debug("Unable to persist fusion insight to Qdrant: %s", embed_exc)
+
+                await self.redis.set(cache_key, "1", expire=self.auto_enhance_ttl_seconds)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            log.debug("Auto enhancement skipped due to error: %s", exc)
+
+    async def _prune_memories_if_needed(self) -> None:
+        if not self.pruning_pipeline:
+            return
+        try:
+            await self.pruning_pipeline.prune_all()
+        except Exception as exc:  # pragma: no cover
+            log.debug("Memory pruning skipped: %s", exc)
+
+    async def _run_weight_review_if_due(self) -> None:
+        if not self.weight_review_pipeline:
+            return
+        manual_trigger = await self.redis.get("review:trigger")
+        if manual_trigger:
+            await self.redis.delete("review:trigger")
+            await self.weight_review_pipeline.run(trigger="manual")
+            self._last_review_run = datetime.utcnow()
+            return
+
+        dashboard = await self.redis.get_json("dashboard:settings") or {}
+        review_interval_hours = float(dashboard.get("review_interval_hours", settings.review_interval_hours))
+        interval = timedelta(hours=review_interval_hours)
+        if datetime.utcnow() - self._last_review_run < interval:
+            return
+        await self.weight_review_pipeline.run(trigger="schedule")
+        self._last_review_run = datetime.utcnow()
 
     async def get_ticker_history(self, ticker: str, limit: int = 50) -> List[Dict[str, Any]]:
         history_raw = await self.redis.lrange(f"memory:trades:{ticker}", -limit, -1)
@@ -369,28 +713,66 @@ class MemoryAgent(BaseAgent):
     # Helper utilities
     # ------------------------------------------------------------------
 
-    def _parse_trade_entry(self, raw: str) -> Optional[TradeMemoryEntry]:
+    async def _parse_trade_entry(self, raw: str) -> Optional[TradeMemoryEntry]:
+        trade_id: Optional[str] = None
+        candidate: Optional[Dict[str, Any]] = None
+
         try:
-            return TradeMemoryEntry.parse_raw(raw)
+            data = json.loads(raw)
         except Exception:
             try:
-                data = json.loads(raw)
+                parsed = TradeMemoryEntry.parse_raw(raw)
             except Exception:
                 return None
-            if "data" not in data:
-                return None
-            legacy = data["data"]
-            return TradeMemoryEntry(
-                trade_id=legacy.get("decision_id") or legacy.get("id") or str(uuid4()),
-                ticker=legacy.get("ticker", "UNKNOWN"),
-                action=self._normalize_action(legacy.get("action", "HOLD")),
-                quantity=self._safe_float(legacy.get("quantity")),
-                price=self._safe_float(legacy.get("executed_price") or legacy.get("price")),
-                pnl=self._extract_pnl(legacy),
-                status=self._determine_trade_status(self._extract_pnl(legacy)),
-                metadata={"raw": legacy},
-                timestamp=self._parse_timestamp(legacy.get("timestamp")),
+            trade_id = parsed.trade_id
+            candidate = parsed.dict()
+        else:
+            trade_id = (
+                data.get("trade_id")
+                or data.get("decision_id")
+                or data.get("id")
             )
+            if "data" in data and not trade_id:
+                legacy = data["data"]
+                trade_id = legacy.get("decision_id") or legacy.get("id")
+                candidate = legacy
+            elif "ticker" in data and "action" in data:
+                candidate = data
+            else:
+                candidate = data.get("data")
+
+        if trade_id:
+            stored = await self.redis.get_json(f"memory:trade:{trade_id}")
+            if stored:
+                candidate = stored
+
+        if not candidate:
+            return None
+
+        snapshot = candidate.copy()
+        snapshot.setdefault("trade_id", trade_id or str(uuid4()))
+        snapshot.setdefault("timestamp", snapshot.get("timestamp") or datetime.utcnow().isoformat())
+
+        pnl_value = self._extract_pnl(snapshot)
+        return TradeMemoryEntry(
+            trade_id=snapshot.get("trade_id", str(uuid4())),
+            ticker=snapshot.get("ticker", "UNKNOWN"),
+            action=self._normalize_action(snapshot.get("action", "HOLD")),
+            quantity=self._safe_float(
+                snapshot.get("quantity")
+                or snapshot.get("amount")
+                or snapshot.get("size")
+            ),
+            price=self._safe_float(
+                snapshot.get("executed_price")
+                or snapshot.get("entry_price")
+                or snapshot.get("price")
+            ),
+            pnl=pnl_value,
+            status=snapshot.get("status") or self._determine_trade_status(pnl_value),
+            metadata=snapshot.get("metadata", {}),
+            timestamp=self._parse_timestamp(snapshot.get("timestamp")),
+        )
 
     def _parse_news_entry(self, raw: str) -> Optional[NewsMemoryEntry]:
         try:
@@ -422,7 +804,7 @@ class MemoryAgent(BaseAgent):
         except Exception:
             return TradeAction.HOLD
 
-    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+    def _safe_float(self, value: Any, default: Optional[float] = 0.0) -> Optional[float]:
         try:
             if value is None:
                 return default
@@ -528,6 +910,12 @@ class MemoryAgent(BaseAgent):
 
         await self.graph_memory.connect(trade_node.node_id, asset_node.node_id, "INVOLVES")
         await self.graph_memory.connect(trade_node.node_id, outcome_node.node_id, "RESULT")
+        log.bind(agent="MEMORY").debug(
+            "Graph memory recorded trade %s action=%s pnl=%s",
+            entry.trade_id,
+            entry.action.value,
+            entry.pnl,
+        )
 
     async def _record_news_in_graph(self, entry: NewsMemoryEntry):
         news_node = GraphMemoryNode(
@@ -557,4 +945,10 @@ class MemoryAgent(BaseAgent):
                 "MENTIONS",
                 weight=entry.weight,
             )
+        log.bind(agent="MEMORY").debug(
+            "Graph memory recorded news %s ticker=%s sentiment=%.2f",
+            entry.news_id,
+            entry.ticker,
+            entry.sentiment_score,
+        )
 

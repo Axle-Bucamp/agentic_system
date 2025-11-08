@@ -38,7 +38,12 @@ class BaseAgent(ABC):
     
     async def start(self):
         """Start the agent."""
-        log.info(f"Starting {self.agent_type.value} agent...")
+        agent_logger = log.bind(
+            agent=self.agent_type.value,
+            cluster=settings.cluster_name,
+            instance=settings.agent_instance_id,
+        )
+        agent_logger.info("Starting %s agent...", self.agent_type.value)
         
         # Connect to Redis
         await self.redis.connect()
@@ -50,7 +55,11 @@ class BaseAgent(ABC):
         channels = self.get_subscribed_channels()
         if channels:
             self.pubsub = await self.redis.subscribe(*channels)
-            log.info(f"{self.agent_type.value} subscribed to channels: {channels}")
+            agent_logger.info(
+                "%s subscribed to channels: %s",
+                self.agent_type.value,
+                channels,
+            )
         
         # Start heartbeat
         self.running = True
@@ -73,7 +82,12 @@ class BaseAgent(ABC):
     
     async def stop(self):
         """Stop the agent."""
-        log.info(f"Stopping {self.agent_type.value} agent...")
+        agent_logger = log.bind(
+            agent=self.agent_type.value,
+            cluster=settings.cluster_name,
+            instance=settings.agent_instance_id,
+        )
+        agent_logger.info("Stopping %s agent...", self.agent_type.value)
         self.running = False
         
         if self.heartbeat_task:
@@ -83,7 +97,7 @@ class BaseAgent(ABC):
             await self.redis.unsubscribe(*self.get_subscribed_channels())
         
         await self.redis.disconnect()
-        log.info(f"{self.agent_type.value} agent stopped")
+        agent_logger.info("%s agent stopped", self.agent_type.value)
     
     def get_subscribed_channels(self) -> list:
         """Get list of channels this agent subscribes to."""
@@ -100,7 +114,12 @@ class BaseAgent(ABC):
         if not self.pubsub:
             return
         
-        log.info(f"{self.agent_type.value} message listener started")
+        agent_logger = log.bind(
+            agent=self.agent_type.value,
+            cluster=settings.cluster_name,
+            instance=settings.agent_instance_id,
+        )
+        agent_logger.info("%s message listener started", self.agent_type.value)
         
         try:
             async for raw_message in self.redis.get_messages():
@@ -112,7 +131,12 @@ class BaseAgent(ABC):
                         continue
                     
                     # Process message
-                    log.debug(f"{self.agent_type.value} received {message.message_type.value} from {message.sender.value}")
+                    agent_logger.debug(
+                        "%s received %s from %s",
+                        self.agent_type.value,
+                        message.message_type.value,
+                        message.sender.value,
+                    )
                     response = await self.process_message(message)
                     
                     # Send response if any
@@ -120,27 +144,32 @@ class BaseAgent(ABC):
                         await self.send_message(response)
                         
                 except Exception as e:
-                    log.error(f"{self.agent_type.value} error processing message: {e}")
+                    agent_logger.error("%s error processing message: %s", self.agent_type.value, e)
         except asyncio.CancelledError:
-            log.info(f"{self.agent_type.value} message listener cancelled")
+            agent_logger.info("%s message listener cancelled", self.agent_type.value)
         except Exception as e:
-            log.error(f"{self.agent_type.value} message listener error: {e}")
+            agent_logger.error("%s message listener error: %s", self.agent_type.value, e)
     
     async def _cycle_loop(self):
         """Run agent cycle periodically."""
-        log.info(f"{self.agent_type.value} cycle loop started")
+        agent_logger = log.bind(
+            agent=self.agent_type.value,
+            cluster=settings.cluster_name,
+            instance=settings.agent_instance_id,
+        )
+        agent_logger.info("%s cycle loop started", self.agent_type.value)
         
         try:
             while self.running:
                 try:
                     await self.run_cycle()
                 except Exception as e:
-                    log.error(f"{self.agent_type.value} cycle error: {e}")
+                    agent_logger.error("%s cycle error: %s", self.agent_type.value, e)
                 
                 # Wait before next cycle
                 await asyncio.sleep(self.get_cycle_interval())
         except asyncio.CancelledError:
-            log.info(f"{self.agent_type.value} cycle loop cancelled")
+            agent_logger.info("%s cycle loop cancelled", self.agent_type.value)
     
     async def _heartbeat_loop(self):
         """Send periodic heartbeat messages."""
@@ -149,7 +178,11 @@ class BaseAgent(ABC):
                 await self.send_heartbeat()
                 await asyncio.sleep(settings.agent_heartbeat_interval)
         except asyncio.CancelledError:
-            log.debug(f"{self.agent_type.value} heartbeat loop cancelled")
+            log.bind(
+                agent=self.agent_type.value,
+                cluster=settings.cluster_name,
+                instance=settings.agent_instance_id,
+            ).debug("%s heartbeat loop cancelled", self.agent_type.value)
     
     async def send_heartbeat(self):
         """Send heartbeat message."""
@@ -183,7 +216,11 @@ class BaseAgent(ABC):
             payload=signal_data
         )
         await self.send_message(message)
-        log.info(f"{self.agent_type.value} sent signal to orchestrator")
+        log.bind(
+            agent=self.agent_type.value,
+            cluster=settings.cluster_name,
+            instance=settings.agent_instance_id,
+        ).info("%s sent signal to orchestrator", self.agent_type.value)
     
     def get_cycle_interval(self) -> int:
         """Get interval between agent cycles in seconds."""

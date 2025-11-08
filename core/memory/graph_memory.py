@@ -10,11 +10,12 @@ from core.models import GraphMemoryEdge, GraphMemoryNode
 
 
 class GraphMemoryManager:
-    """Manage a lightweight knowledge graph stored in Redis."""
+    """Manage a lightweight knowledge graph stored in Redis (optionally mirrored to Neo4j)."""
 
-    def __init__(self, redis_client, namespace: str = "memory:graph"):
+    def __init__(self, redis_client, namespace: str = "memory:graph", neo4j_client=None):
         self.redis = redis_client
         self.namespace = namespace
+        self.neo4j_client = neo4j_client
 
     def _nodes_key(self) -> str:
         return f"{self.namespace}:nodes"
@@ -49,6 +50,8 @@ class GraphMemoryManager:
                 node.weight = max(existing.weight, node.weight)
             node.updated_at = datetime.utcnow()
             await self.redis.hset(self._nodes_key(), node.node_id, node.json())
+            if self.neo4j_client:
+                await self.neo4j_client.upsert_node(node)
         except Exception as exc:  # pragma: no cover - defensive logging
             log.error("Failed to upsert graph node %s: %s", node.node_id, exc)
         return node
@@ -63,6 +66,8 @@ class GraphMemoryManager:
                 edge.weight = max(existing.weight, edge.weight)
             edge.updated_at = datetime.utcnow()
             await self.redis.hset(self._edges_key(), edge.edge_id, edge.json())
+            if self.neo4j_client:
+                await self.neo4j_client.upsert_edge(edge)
         except Exception as exc:  # pragma: no cover - defensive logging
             log.error("Failed to upsert graph edge %s: %s", edge.edge_id, exc)
         return edge

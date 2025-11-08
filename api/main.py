@@ -2,7 +2,7 @@
 Main FastAPI application for the Agentic Trading System.
 Enhanced to match forecasting API patterns with production-grade features.
 """
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
+from collections import deque
+from pathlib import Path
 import inspect
 from datetime import datetime, timedelta
 import time
@@ -17,8 +19,10 @@ import uuid
 import asyncio
 import json
 from functools import wraps
+from uuid import uuid4
 
 from core.config import settings
+from core import asset_registry
 from core.logging import log
 from core.redis_client import redis_client
 from core.exchange_manager import exchange_manager
@@ -26,7 +30,21 @@ from core.forecasting_client import forecasting_client
 from core.models import (
     Portfolio, PerformanceMetrics, HumanValidationRequest,
     HumanValidationResponse, TradeDecision, AgentMessage, MessageType,
-    TradeAction, ExchangeType
+    TradeAction, ExchangeType, RiskMetrics
+)
+from core.memory.graph_memory import GraphMemoryManager
+from core.pipelines import (
+    TrendPipeline,
+    FactPipeline,
+    FusionEngine,
+    FusionInputs,
+    MemoryPruningPipeline,
+    get_trend_assessment,
+    set_trend_assessment,
+    get_fact_insight,
+    set_fact_insight,
+    get_fusion_recommendation,
+    set_fusion_recommendation,
 )
 # Security imports (commented out for now due to missing dependencies)
 # from core.security.security_middleware import create_security_middleware
@@ -48,32 +66,36 @@ def rate_limit(max_requests: int = 100, window_seconds: int = 60):
 
         @wraps(func)
         async def wrapper(request: Request, *args, **kwargs):
-            client_ip = request.client.host
+            client_ip = request.client.host if request.client else "unknown"
+            endpoint = request.url.path
+            key = f"{client_ip}:{endpoint}"
             current_time = time.time()
             window_start = current_time - window_seconds
-            
+
             # Clean old entries
-            if client_ip in rate_limit_storage:
-                rate_limit_storage[client_ip] = [
-                    req_time for req_time in rate_limit_storage[client_ip]
+            if key in rate_limit_storage:
+                rate_limit_storage[key] = [
+                    req_time
+                    for req_time in rate_limit_storage[key]
                     if req_time > window_start
                 ]
             else:
-                rate_limit_storage[client_ip] = []
-            
+                rate_limit_storage[key] = []
+
             # Check rate limit
-            if len(rate_limit_storage[client_ip]) >= max_requests:
+            if len(rate_limit_storage[key]) >= max_requests:
                 raise HTTPException(
                     status_code=429,
-                    detail="Rate limit exceeded. Please try again later."
+                    detail="Rate limit exceeded. Please try again later.",
                 )
-            
+
             # Add current request
-            rate_limit_storage[client_ip].append(current_time)
-            
+            rate_limit_storage[key].append(current_time)
+
             if expects_request:
                 return await func(request, *args, **kwargs)
             return await func(*args, **kwargs)
+
         if expects_request:
             wrapper.__signature__ = signature
         else:
@@ -87,6 +109,170 @@ def rate_limit(max_requests: int = 100, window_seconds: int = 60):
             )
         return wrapper
     return decorator
+
+
+CHAT_HISTORY_KEY = "chat:history:{user_id}"
+LOG_FILE_MAP = {
+    "trading": Path(settings.log_file),
+    "errors": Path(settings.log_file).with_name("errors.log"),
+    "decisions": Path(settings.log_file).with_name("trading_decisions.log"),
+    "portfolio": Path(settings.log_file).with_name("portfolio_plans.log"),
+}
+DASHBOARD_SETTINGS_KEY = "dashboard:settings"
+DEFAULT_DASHBOARD_SETTINGS: Dict[str, Any] = {
+    "schedule_profile": settings.agent_schedule_profile,
+    "memory_prune_limit": settings.memory_prune_limit,
+    "memory_prune_similarity_threshold": settings.memory_prune_similarity_threshold,
+    "review_interval_hours": settings.review_interval_hours,
+    "review_prompt": settings.review_prompt_default,
+    "observation_interval": settings.observation_interval,
+    "decision_interval": settings.decision_interval,
+    "forecast_interval": settings.forecast_interval,
+}
+
+
+async def _record_pipeline_trade(
+    agent_label: str,
+    ticker: str,
+    action: str,
+    confidence: float,
+    price: Optional[float],
+    metadata: Dict[str, Any],
+) -> None:
+    """Persist a simulated trade generated by manual pipeline runs."""
+    trade_id = f"pipeline:{agent_label}:{uuid4().hex}"
+    record = {
+        "trade_id": trade_id,
+        "ticker": ticker,
+        "action": action.upper(),
+        "quantity": metadata.get("quantity", 0.0),
+        "executed_price": price,
+        "entry_price": price,
+        "evaluation_price": price,
+        "pnl": 0.0,
+        "reward": 0.0,
+        "status": "SIMULATED",
+        "confidence": confidence,
+        "generated_by_pipeline": True,
+        "agent": agent_label,
+        "metadata": metadata,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+    await redis_client.set_json(f"memory:trade:{trade_id}", record)
+    await redis_client.lpush("memory:trades", json.dumps({"trade_id": trade_id}))
+    await redis_client.ltrim("memory:trades", 0, 199)
+    await redis_client.lpush(f"memory:trades:{ticker}", json.dumps({"trade_id": trade_id}))
+    await redis_client.ltrim(f"memory:trades:{ticker}", 0, 199)
+    log.bind(event="pipeline_trade", agent=agent_label).info(
+        "Recorded pipeline trade %s %s action=%s confidence=%.2f",
+        trade_id,
+        ticker,
+        action.upper(),
+        confidence,
+    )
+
+
+async def _append_chat_entry(user_id: str, role: str, content: str) -> None:
+    entry = {
+        "role": role,
+        "content": content,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    key = CHAT_HISTORY_KEY.format(user_id=user_id)
+    await redis_client.lpush(key, json.dumps(entry))
+    await redis_client.ltrim(key, 0, max(settings.memory_chat_history_limit - 1, 0))
+
+
+async def _get_chat_history(user_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    key = CHAT_HISTORY_KEY.format(user_id=user_id)
+    end_index = (limit - 1) if limit else settings.memory_chat_history_limit - 1
+    raw_entries = await redis_client.lrange(key, 0, max(end_index, 0))
+    history = []
+    for raw in reversed(raw_entries):
+        try:
+            history.append(json.loads(raw))
+        except json.JSONDecodeError:
+            continue
+    return history
+
+
+async def _generate_chat_response(user_id: str, prompt: str) -> str:
+    fusion_items: List[Dict[str, Any]] = []
+    for ticker in asset_registry.get_assets():
+        data = await redis_client.get_json(f"pipeline:fusion:{ticker}")
+        if data:
+            fusion_items.append(data)
+
+    fusion_items.sort(key=lambda item: item.get("percent_allocation", 0.0), reverse=True)
+    lines = [f"User prompt: {prompt.strip()}"]
+
+    if not fusion_items:
+        lines.append("Analyst: No fresh fusion signals available yet. Keep positions neutral for now.")
+        return "\n".join(lines)
+
+    top_pick = fusion_items[0]
+    counter_pick = next((item for item in fusion_items[1:] if item.get("action") != top_pick.get("action")), None)
+
+    def format_item(item: Dict[str, Any]) -> str:
+        alloc = item.get("percent_allocation", 0.0)
+        return (
+            f"{item.get('ticker')} -> {item.get('action')} "
+            f"(confidence {item.get('confidence', 0.0):.2f}, alloc {alloc:.2%}, "
+            f"risk {item.get('risk_level', 'UNKNOWN')})"
+        )
+
+    lines.append(f"Analyst A: {format_item(top_pick)}; rationale: {top_pick.get('rationale', 'n/a')}")
+
+    if counter_pick:
+        lines.append(f"Analyst B: {format_item(counter_pick)}; counterpoint: {counter_pick.get('rationale', 'n/a')}")
+    else:
+        lines.append("Analyst B: No opposing signal with meaningful conviction. Focus on disciplined sizing.")
+
+    lines.append("Moderator: Balance confidence with stop-loss levels before acting.")
+    return "\n".join(lines)
+
+
+def _resolve_log_path(source: str) -> Path:
+    base = LOG_FILE_MAP.get(source, LOG_FILE_MAP["trading"])
+    if base.exists():
+        return base
+    fallback = Path.cwd() / "logs" / base.name
+    if fallback.exists():
+        return fallback
+    return fallback
+
+
+async def _read_recent_logs(path: Path, limit: int) -> List[str]:
+    limit = max(limit, 1)
+
+    def _read() -> List[str]:
+        lines = deque(maxlen=limit)
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    lines.append(line.rstrip("\n"))
+        except FileNotFoundError:
+            return []
+        return list(lines)
+
+    return await asyncio.to_thread(_read)
+
+
+async def _load_dashboard_settings() -> Dict[str, Any]:
+    stored = await redis_client.get_json(DASHBOARD_SETTINGS_KEY) or {}
+    merged = DEFAULT_DASHBOARD_SETTINGS.copy()
+    merged.update(stored)
+    return merged
+
+
+async def _save_dashboard_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    merged = await _load_dashboard_settings()
+    merged.update(payload)
+    await redis_client.set_json(DASHBOARD_SETTINGS_KEY, merged)
+    log.info("Dashboard settings updated: %s", payload)
+    return merged
+
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Get current user from JWT token (optional authentication)."""
@@ -327,15 +513,25 @@ async def get_portfolio_trades(
         raise HTTPException(status_code=404, detail="Portfolio not found")
     
     trades_raw = await redis_client.lrange("memory:trades", offset, offset + limit - 1)
-    trades = []
+    trades: List[Dict[str, Any]] = []
     
     for trade_data in trades_raw:
         try:
-            import json
             trade = json.loads(trade_data)
-            trades.append(trade)
         except json.JSONDecodeError:
             continue
+
+        trade_id = (
+            trade.get("trade_id")
+            or trade.get("decision_id")
+            or trade.get("id")
+        )
+        if trade_id:
+            enriched = await redis_client.get_json(f"memory:trade:{trade_id}")
+            if enriched:
+                trades.append(enriched)
+                continue
+        trades.append(trade)
     
     return {
         "trades": trades,
@@ -416,6 +612,311 @@ async def execute_trade(
     except Exception as e:
         log.error(f"Trade execution error: {e}")
         raise HTTPException(status_code=500, detail=f"Trade execution failed: {str(e)}")
+
+
+@app.get("/api/chat/{user_id}")
+@rate_limit(max_requests=30, window_seconds=60)
+async def get_chat_history_endpoint(user_id: str, limit: int = 50):
+    """Return chat history for a given user."""
+    history = await _get_chat_history(user_id, limit=limit)
+    return {"user_id": user_id, "history": history}
+
+
+@app.post("/api/chat")
+@rate_limit(max_requests=30, window_seconds=60)
+async def post_chat_message(payload: Dict[str, Any], user: Optional[Dict] = Depends(get_current_user)):
+    """Append a chat message and return the assistant reply."""
+    user_id = payload.get("user_id") or (user.get("user_id") if user else "anonymous")
+    message = (payload.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    await _append_chat_entry(user_id, "user", message)
+    reply = await _generate_chat_response(user_id, message)
+    await _append_chat_entry(user_id, "assistant", reply)
+    history = await _get_chat_history(user_id, limit=settings.memory_chat_history_limit)
+    return {"user_id": user_id, "reply": reply, "history": history}
+
+
+@app.get("/api/settings")
+@rate_limit(max_requests=20, window_seconds=60)
+async def get_dashboard_settings():
+    """Return tunable dashboard settings."""
+    return {"settings": await _load_dashboard_settings()}
+
+
+@app.post("/api/settings")
+@rate_limit(max_requests=20, window_seconds=60)
+async def update_dashboard_settings(settings_payload: Dict[str, Any]):
+    """Persist dashboard settings and apply runtime overrides."""
+    merged = await _save_dashboard_settings(settings_payload)
+    # Apply runtime overrides for intervals
+    settings.agent_schedule_profile = merged.get("schedule_profile", settings.agent_schedule_profile)
+    settings.memory_prune_limit = int(merged.get("memory_prune_limit", settings.memory_prune_limit))
+    settings.memory_prune_similarity_threshold = float(
+        merged.get("memory_prune_similarity_threshold", settings.memory_prune_similarity_threshold)
+    )
+    settings.review_interval_hours = int(merged.get("review_interval_hours", settings.review_interval_hours))
+    settings.review_prompt_default = merged.get("review_prompt", settings.review_prompt_default)
+    settings.observation_interval = merged.get("observation_interval", settings.observation_interval)
+    settings.decision_interval = merged.get("decision_interval", settings.decision_interval)
+    settings.forecast_interval = merged.get("forecast_interval", settings.forecast_interval)
+    return {"settings": merged}
+
+
+@app.post("/api/review/run")
+@rate_limit(max_requests=10, window_seconds=60)
+async def trigger_review_run():
+    """Trigger the weight review pipeline on the next memory agent cycle."""
+    await redis_client.set("review:trigger", "1")
+    return {"queued": True}
+
+
+@app.post("/api/agents/copytrade/toggle")
+@rate_limit(max_requests=20, window_seconds=60)
+async def toggle_copytrade_agent(payload: Dict[str, Any]):
+    """Enable or disable the copy trade agent runtime."""
+    if "enabled" not in payload:
+        raise HTTPException(status_code=400, detail="enabled flag required")
+    enabled = bool(payload["enabled"])
+    await redis_client.set("copytrade:enabled", "1" if enabled else "0")
+    await redis_client.set_json(
+        "copytrade:status",
+        {"enabled": enabled, "updated_at": datetime.utcnow().isoformat()},
+    )
+    return {"enabled": enabled}
+
+@app.get("/api/agents/rewards")
+@rate_limit(max_requests=60, window_seconds=60)
+async def agent_reward_summary():
+    """Return aggregated reward metrics per agent."""
+    rewards = await redis_client.get_json("memory:agent_rewards") or {}
+    return {"rewards": rewards}
+
+
+@app.get("/api/agents/status")
+@rate_limit(max_requests=20, window_seconds=60)
+async def get_agent_status():
+    """Return high-level status for orchestrated agents and pipelines."""
+    copytrade_status = await redis_client.get_json("copytrade:status") or {"enabled": True}
+
+    trend_status = []
+    fact_status = []
+    fusion_status = []
+    for ticker in asset_registry.get_assets():
+        trend = await redis_client.get_json(f"pipeline:trend:{ticker}")
+        if trend:
+            trend_status.append({"ticker": ticker, "generated_at": trend.get("generated_at")})
+        fact = await redis_client.get_json(f"pipeline:fact:{ticker}")
+        if fact:
+            fact_status.append({"ticker": ticker, "generated_at": fact.get("generated_at")})
+        fusion = await redis_client.get_json(f"pipeline:fusion:{ticker}")
+        if fusion:
+            fusion_status.append(
+                {
+                    "ticker": ticker,
+                    "generated_at": fusion.get("generated_at"),
+                    "action": fusion.get("action"),
+                    "confidence": fusion.get("confidence"),
+                }
+            )
+
+    return {
+        "copytrade": copytrade_status,
+        "trend": trend_status,
+        "fact": fact_status,
+        "fusion": fusion_status,
+        "logfire_enabled": bool(settings.logfire_token),
+    }
+
+
+@app.get("/api/pipelines/fusion")
+@rate_limit(max_requests=20, window_seconds=60)
+async def list_fusion_recommendations():
+    """Return latest fusion recommendations for all assets."""
+    items = []
+    for ticker in asset_registry.get_assets():
+        fusion = await redis_client.get_json(f"pipeline:fusion:{ticker}")
+        if fusion:
+            items.append(fusion)
+    items.sort(key=lambda item: item.get("percent_allocation", 0.0), reverse=True)
+    return {"items": items}
+
+
+@app.post("/api/pipelines/trend/run")
+@rate_limit(max_requests=20, window_seconds=60)
+async def run_trend_pipeline_endpoint(payload: Dict[str, Any]):
+    ticker = (payload or {}).get("ticker")
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = ticker.upper()
+    pipeline = TrendPipeline(redis_client)
+    assessment = await pipeline.run_for_ticker(ticker)
+    if assessment:
+        await set_trend_assessment(redis_client, assessment)
+        chart_data = (assessment.supporting_signals or {}).get("chart", {})
+        price = chart_data.get("current_price")
+        assessment_payload = assessment.model_dump(mode="json")
+        await _record_pipeline_trade(
+            agent_label="TREND",
+            ticker=ticker,
+            action=assessment.recommended_action.value,
+            confidence=assessment.confidence,
+            price=price,
+            metadata={"assessment": assessment_payload},
+        )
+        log.bind(event="pipeline_run", agent="TREND").info(
+            "Trend pipeline run for %s -> %s (confidence=%.2f)",
+            ticker,
+            assessment.recommended_action.value,
+            assessment.confidence,
+        )
+        return {"success": True, "assessment": assessment.dict()}
+    log.bind(event="pipeline_run", agent="TREND").warning(
+        "Trend pipeline insufficient data for %s", ticker
+    )
+    return {"success": False, "message": "Insufficient data to compute trend assessment"}
+
+
+@app.post("/api/pipelines/fact/run")
+@rate_limit(max_requests=20, window_seconds=60)
+async def run_fact_pipeline_endpoint(payload: Dict[str, Any]):
+    ticker = (payload or {}).get("ticker")
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = ticker.upper()
+    async with FactPipeline(redis_client) as pipeline:
+        insight = await pipeline.run_for_ticker(ticker)
+    if insight:
+        await set_fact_insight(redis_client, insight)
+        action = "HOLD"
+        if insight.sentiment_score > 0.2:
+            action = "BUY"
+        elif insight.sentiment_score < -0.2:
+            action = "SELL"
+        insight_payload = insight.model_dump(mode="json")
+        await _record_pipeline_trade(
+            agent_label="FACT",
+            ticker=ticker,
+            action=action,
+            confidence=insight.confidence,
+            price=None,
+            metadata={"insight": insight_payload},
+        )
+        log.bind(event="pipeline_run", agent="FACT").info(
+            "Fact pipeline run for %s sentiment=%.2f -> %s",
+            ticker,
+            insight.sentiment_score,
+            action,
+        )
+        return {"success": True, "insight": insight.dict()}
+    log.bind(event="pipeline_run", agent="FACT").warning(
+        "Fact pipeline insufficient data for %s", ticker
+    )
+    return {"success": False, "message": "Insufficient data to compute fact insight"}
+
+
+@app.post("/api/pipelines/fusion/run")
+@rate_limit(max_requests=20, window_seconds=60)
+async def run_fusion_pipeline_endpoint(payload: Dict[str, Any]):
+    ticker = (payload or {}).get("ticker")
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker is required")
+    ticker = ticker.upper()
+    trend = await get_trend_assessment(redis_client, ticker)
+    fact = await get_fact_insight(redis_client, ticker)
+    risk_payload = await redis_client.get_json(f"risk:asset:{ticker}") or {}
+    risk = None
+    if risk_payload:
+        try:
+            risk = RiskMetrics(**risk_payload)
+        except Exception:
+            risk = None
+    inputs = FusionInputs(
+        trend=trend,
+        fact=fact,
+        risk=risk,
+        copy_confidence=0.0,
+    )
+    fusion_engine = FusionEngine()
+    recommendation = fusion_engine.combine(ticker, inputs)
+    await set_fusion_recommendation(redis_client, recommendation)
+    trend_payload = trend.model_dump(mode="json") if trend else None
+    fact_payload = fact.model_dump(mode="json") if fact else None
+    recommendation_payload = recommendation.model_dump(mode="json")
+    await _record_pipeline_trade(
+        agent_label="FUSION",
+        ticker=ticker,
+        action=recommendation.action.value,
+        confidence=recommendation.confidence,
+        price=None,
+        metadata={
+            "recommendation": recommendation_payload,
+            "trend": trend_payload,
+            "fact": fact_payload,
+            "risk": risk_payload,
+        },
+    )
+    log.bind(event="pipeline_run", agent="FUSION").info(
+        "Fusion pipeline run for %s -> %s (confidence=%.2f)",
+        ticker,
+        recommendation.action.value,
+        recommendation.confidence,
+    )
+    return {"success": True, "recommendation": recommendation.dict()}
+
+
+@app.post("/api/pipelines/prune/run")
+@rate_limit(max_requests=20, window_seconds=60)
+async def run_prune_pipeline_endpoint():
+    pipeline = MemoryPruningPipeline(redis_client)
+    await pipeline.prune_all()
+    log.bind(event="pipeline_run", agent="PRUNE").info("Memory pruning pipeline executed on demand")
+    return {"success": True}
+
+
+@app.get("/api/pipelines/trend/{ticker}")
+@rate_limit(max_requests=30, window_seconds=60)
+async def get_trend_assessment_endpoint(ticker: str):
+    trend = await redis_client.get_json(f"pipeline:trend:{ticker.upper()}")
+    if not trend:
+        raise HTTPException(status_code=404, detail="Trend assessment not found")
+    return {"assessment": trend}
+
+
+@app.get("/api/pipelines/fact/{ticker}")
+@rate_limit(max_requests=30, window_seconds=60)
+async def get_fact_insight_endpoint(ticker: str):
+    fact = await redis_client.get_json(f"pipeline:fact:{ticker.upper()}")
+    if not fact:
+        raise HTTPException(status_code=404, detail="Fact insight not found")
+    return {"insight": fact}
+
+
+@app.get("/api/memory/graph")
+@rate_limit(max_requests=120, window_seconds=60)
+async def get_graph_memory_snapshot(nodes: int = 100, edges: int = 200):
+    """Return a snapshot of the knowledge graph for monitoring."""
+    manager = GraphMemoryManager(redis_client)
+    snapshot = await manager.get_snapshot(node_limit=min(nodes, 500), edge_limit=min(edges, 1000))
+    nodes_payload = [node.dict() for node in snapshot["nodes"]]
+    edges_payload = [edge.dict() for edge in snapshot["edges"]]
+    return {"nodes": nodes_payload, "edges": edges_payload}
+
+
+@app.get("/api/logs/recent")
+@rate_limit(max_requests=120, window_seconds=60)
+async def get_recent_logs(limit: int = 100, source: str = "trading"):
+    """Return tail of server logs for observability dashboards."""
+    path = _resolve_log_path(source)
+    lines = await _read_recent_logs(path, limit)
+    return {
+        "source": source,
+        "path": str(path),
+        "lines": lines,
+        "logfire_enabled": bool(settings.logfire_token),
+    }
+
 
 @app.get("/api/watchlists")
 @rate_limit(max_requests=50, window_seconds=60)
@@ -890,7 +1391,23 @@ async def get_trade_history(limit: int = 50):
     """Get trade history."""
     trades_raw = await redis_client.lrange("memory:trades", 0, limit - 1)
     
-    trades = [json.loads(t) for t in trades_raw]
+    trades: List[Dict[str, Any]] = []
+    for raw in trades_raw:
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        trade_id = (
+            entry.get("trade_id")
+            or entry.get("decision_id")
+            or entry.get("id")
+        )
+        if trade_id:
+            enriched = await redis_client.get_json(f"memory:trade:{trade_id}")
+            if enriched:
+                trades.append(enriched)
+                continue
+        trades.append(entry)
     
     return {"trades": trades, "count": len(trades)}
 
@@ -901,7 +1418,23 @@ async def get_ticker_trade_history(ticker: str, limit: int = 20):
     """Get trade history for a specific ticker."""
     trades_raw = await redis_client.lrange(f"memory:trades:{ticker}", 0, limit - 1)
     
-    trades = [json.loads(t) for t in trades_raw]
+    trades: List[Dict[str, Any]] = []
+    for raw in trades_raw:
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        trade_id = (
+            entry.get("trade_id")
+            or entry.get("decision_id")
+            or entry.get("id")
+        )
+        if trade_id:
+            enriched = await redis_client.get_json(f"memory:trade:{trade_id}")
+            if enriched:
+                trades.append(enriched)
+                continue
+        trades.append(entry)
     
     return {"ticker": ticker, "trades": trades, "count": len(trades)}
 

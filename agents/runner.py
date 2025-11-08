@@ -11,10 +11,12 @@ from core.logging import log
 from agents.memory_agent import MemoryAgent
 from agents.dqn_agent import DQNAgent
 from agents.chart_agent import ChartAgent
+from agents.fact_agent import FactAgent
 from agents.risk_agent import RiskAgent
 from agents.news_agent import NewsAgent
 from agents.copytrade_agent import CopyTradeAgent
 from agents.orchestrator import OrchestratorAgent
+from agents.trend_agent import TrendAgent
 from agents.workforce_orchestrator import WorkforceOrchestratorAgent
 
 
@@ -40,8 +42,10 @@ async def main():
         "memory": MemoryAgent,
         "dqn": DQNAgent,
         "chart": ChartAgent,
+        "trend": TrendAgent,
         "risk": RiskAgent,
         "news": NewsAgent,
+        "fact": FactAgent,
         "copytrade": CopyTradeAgent,
         "orchestrator": OrchestratorAgent,
         "workforce": WorkforceOrchestratorAgent,
