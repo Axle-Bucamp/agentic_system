@@ -81,9 +81,9 @@ class FusionEngine:
             percent_allocation = max(0.0, min(abs(blended), 1.0)) * self.max_allocation
 
         components: Dict[str, object] = {
-            "trend": inputs.trend.dict() if inputs.trend else None,
-            "fact": inputs.fact.dict() if inputs.fact else None,
-            "risk": inputs.risk.dict() if inputs.risk else None,
+            "trend": inputs.trend.model_dump(mode="json") if inputs.trend else None,
+            "fact": inputs.fact.model_dump(mode="json") if inputs.fact else None,
+            "risk": inputs.risk.model_dump(mode="json") if inputs.risk else None,
             "copy_confidence": inputs.copy_confidence,
             "blended_score": blended,
         }

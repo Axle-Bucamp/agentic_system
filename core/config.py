@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     )
     
     # Mock services
-    use_mock_services: bool = Field(default=True, env="USE_MOCK_SERVICES")
+    use_mock_services: bool = Field(default=False, env="USE_MOCK_SERVICES")
     
     # Exchange API Keys
     mexc_api_key: Optional[str] = Field(default=None, env="MEXC_API_KEY")
@@ -122,6 +122,15 @@ class Settings(BaseSettings):
     deep_search_sources: List[str] = Field(
         default_factory=lambda: ["coindesk", "cointelegraph", "decrypt"]
     )
+    news_source_weights: Dict[str, float] = Field(
+        default_factory=lambda: {
+            "yahoo_finance": 0.35,
+            "coin_bureau": 0.25,
+            "arxiv": 0.20,
+            "google_scholar": 0.20,
+        },
+        env="NEWS_SOURCE_WEIGHTS",
+    )
     arxiv_enabled: bool = Field(default=True, env="ARXIV_ENABLED")
     deep_research_mcp_url: Optional[str] = Field(default=None, env="DEEP_RESEARCH_MCP_URL")
     deep_research_depth: int = Field(default=2, env="DEEP_RESEARCH_DEPTH")
@@ -190,6 +199,22 @@ class Settings(BaseSettings):
                 "orchestrator": 14400,
                 "workforce": 14400,
             },
+        }
+    )
+    pipeline_live_defaults: Dict[str, Dict[str, Union[bool, str]]] = Field(
+        default_factory=lambda: {
+            "trend": {"enabled": False, "interval": "hours"},
+            "fact": {"enabled": False, "interval": "hours"},
+            "fusion": {"enabled": False, "interval": "hours"},
+            "prune": {"enabled": True, "interval": "days"},
+        }
+    )
+    pipeline_live_interval_seconds: Dict[str, Dict[str, int]] = Field(
+        default_factory=lambda: {
+            "trend": {"minutes": 300, "hours": 1800, "days": 10800},
+            "fact": {"minutes": 900, "hours": 3600, "days": 14400},
+            "fusion": {"minutes": 600, "hours": 1800, "days": 7200},
+            "prune": {"minutes": 1800, "hours": 7200, "days": 86400},
         }
     )
     agent_cycle_overrides: Dict[str, int] = Field(default_factory=dict, env="AGENT_CYCLE_OVERRIDES")

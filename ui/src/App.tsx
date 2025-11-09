@@ -24,6 +24,8 @@ import {
   runPrunePipeline,
   getPortfolioTrades,
   getAgentRewards,
+  getPipelineLiveConfig,
+  updatePipelineLiveConfig,
 } from "./api";
 import {
   AllocationEntry,
@@ -39,6 +41,8 @@ import {
   WalletPlan,
   WeightedNewsEntry,
   DashboardSettings,
+  PipelineLiveConfig,
+  PipelineLiveEntry,
 } from "./types";
 
 type CopyScoreMap = Record<
@@ -71,6 +75,26 @@ const riskBadge = (riskLevel: string) => {
 const stopLossText = (entry: AllocationEntry) => {
   const [upper, lower] = entry.stop_loss;
   return `+${(upper * 100).toFixed(1)}% / ${(lower * 100).toFixed(1)}%`;
+};
+
+const formatPipelineName = (value: string) =>
+  value
+    .split("_")
+    .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+    .join(" ");
+
+const approximateInterval = (seconds?: number) => {
+  if (!seconds || seconds <= 0) return "n/a";
+  if (seconds >= 86400) {
+    const days = seconds / 86400;
+    return `${days % 1 === 0 ? days.toFixed(0) : days.toFixed(1)}d`;
+  }
+  if (seconds >= 3600) {
+    const hours = seconds / 3600;
+    return `${hours % 1 === 0 ? hours.toFixed(0) : hours.toFixed(1)}h`;
+  }
+  const minutes = seconds / 60;
+  return `${minutes % 1 === 0 ? Math.max(minutes, 1).toFixed(0) : minutes.toFixed(1)}m`;
 };
 
 const copyScoreLabel = (score?: number) => {
@@ -113,6 +137,11 @@ const App = () => {
   const [pipelineBusy, setPipelineBusy] = useState<boolean>(false);
   const [recentTrades, setRecentTrades] = useState<TradeRecord[]>([]);
   const [agentRewards, setAgentRewards] = useState<Record<string, AgentRewardSummary>>({});
+  const [pipelineLiveConfig, setPipelineLiveConfig] = useState<PipelineLiveConfig | null>(null);
+  const [pipelineLiveDraft, setPipelineLiveDraft] = useState<PipelineLiveConfig | null>(null);
+  const [pipelineIntervals, setPipelineIntervals] = useState<string[]>(["minutes", "hours", "days"]);
+  const [pipelineLiveMessage, setPipelineLiveMessage] = useState<string | null>(null);
+  const [pipelineLiveBusy, setPipelineLiveBusy] = useState<boolean>(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -129,6 +158,7 @@ const App = () => {
         graphResponse,
         logResponse,
         settingsResponse,
+        liveConfigResponse,
         forecastResponse,
         tradesResponse,
         rewardsResponse,
@@ -148,6 +178,10 @@ const App = () => {
           logfire_enabled: false,
         })),
         getDashboardSettings().catch(() => ({ settings: undefined })),
+        getPipelineLiveConfig().catch(() => ({
+          pipelines: {},
+          intervals: ["minutes", "hours", "days"],
+        })),
         getForecastTickers().catch(() => ({ tickers: [], count: 0 })),
         getPortfolioTrades(20).catch(() => ({
           trades: [],
@@ -174,6 +208,18 @@ const App = () => {
       if (settingsResponse.settings) {
         setSettingsState(settingsResponse.settings);
         setSettingsDraft(settingsResponse.settings);
+      }
+      if (liveConfigResponse.intervals) {
+        setPipelineIntervals(liveConfigResponse.intervals);
+      }
+      if (liveConfigResponse.pipelines) {
+        setPipelineLiveConfig(liveConfigResponse.pipelines);
+        setPipelineLiveDraft(
+          JSON.parse(JSON.stringify(liveConfigResponse.pipelines)) as PipelineLiveConfig,
+        );
+      } else {
+        setPipelineLiveConfig(null);
+        setPipelineLiveDraft(null);
       }
       if (forecastResponse.tickers) {
         const cleaned = forecastResponse.tickers
@@ -393,6 +439,54 @@ const App = () => {
       setPipelineMessage(err instanceof Error ? err.message : "Unable to execute pipeline");
     } finally {
       setPipelineBusy(false);
+    }
+  };
+
+  const updatePipelineLiveField = (pipeline: string, updates: Partial<PipelineLiveEntry>) => {
+    setPipelineLiveDraft((prev) => {
+      if (!prev || !prev[pipeline]) return prev;
+      return {
+        ...prev,
+        [pipeline]: {
+          ...prev[pipeline],
+          ...updates,
+        },
+      };
+    });
+    setPipelineLiveMessage(null);
+  };
+
+  const handlePipelineLiveToggle = (pipeline: string, enabled: boolean) => {
+    updatePipelineLiveField(pipeline, { enabled });
+  };
+
+  const handlePipelineLiveIntervalChange = (pipeline: string, interval: string) => {
+    updatePipelineLiveField(pipeline, { interval });
+  };
+
+  const handlePipelineLiveSave = async () => {
+    if (!pipelineLiveDraft) return;
+    setPipelineLiveBusy(true);
+    setPipelineLiveMessage(null);
+    try {
+      const payload = Object.entries(pipelineLiveDraft).reduce(
+        (acc, [key, value]) => ({
+          ...acc,
+          [key]: {
+            enabled: value.enabled,
+            interval: value.interval,
+          },
+        }),
+        {} as Record<string, { enabled: boolean; interval: string }>,
+      );
+      const response = await updatePipelineLiveConfig(payload);
+      setPipelineLiveConfig(response.pipelines);
+      setPipelineLiveDraft(JSON.parse(JSON.stringify(response.pipelines)) as PipelineLiveConfig);
+      setPipelineLiveMessage("Live-mode configuration saved");
+    } catch (err) {
+      setPipelineLiveMessage(err instanceof Error ? err.message : "Unable to update live-mode");
+    } finally {
+      setPipelineLiveBusy(false);
     }
   };
 
@@ -694,6 +788,63 @@ const App = () => {
               Run Memory Prune
             </button>
           </div>
+          {pipelineLiveDraft ? (
+            <div className="pipeline-live-controls">
+              <h3 style={{ marginTop: "1.5rem" }}>Live Mode Scheduling</h3>
+              <table className="allocation-table">
+                <thead>
+                  <tr>
+                    <th>Pipeline</th>
+                    <th>Enabled</th>
+                    <th>Interval</th>
+                    <th>Effective Cadence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(pipelineLiveDraft).map(([key, config]) => (
+                    <tr key={key}>
+                      <td>{formatPipelineName(key)}</td>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={config.enabled}
+                          onChange={(event) => handlePipelineLiveToggle(key, event.target.checked)}
+                        />
+                      </td>
+                      <td>
+                        <select
+                          value={config.interval}
+                          onChange={(event) => handlePipelineLiveIntervalChange(key, event.target.value)}
+                        >
+                          {pipelineIntervals.map((option) => (
+                            <option key={option} value={option}>
+                              {formatPipelineName(option)}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>{approximateInterval(pipelineLiveConfig?.[key]?.seconds)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="settings-actions" style={{ marginTop: "0.75rem" }}>
+                <button
+                  type="button"
+                  className="refresh-button"
+                  onClick={handlePipelineLiveSave}
+                  disabled={pipelineLiveBusy}
+                >
+                  {pipelineLiveBusy ? "Saving…" : "Save Live Mode"}
+                </button>
+                {pipelineLiveMessage && <span className="muted">{pipelineLiveMessage}</span>}
+              </div>
+            </div>
+          ) : (
+            <p className="muted" style={{ marginTop: "1rem" }}>
+              Live-mode configuration unavailable.
+            </p>
+          )}
           {pipelineMessage && <p className="muted">{pipelineMessage}</p>}
         </section>
       </div>

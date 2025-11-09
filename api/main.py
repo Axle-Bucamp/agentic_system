@@ -119,6 +119,22 @@ LOG_FILE_MAP = {
     "portfolio": Path(settings.log_file).with_name("portfolio_plans.log"),
 }
 DASHBOARD_SETTINGS_KEY = "dashboard:settings"
+PIPELINE_LIVE_KEY = "pipeline_live_config"
+PIPELINE_LIVE_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    name: {
+        "enabled": bool(config.get("enabled", False)),
+        "interval": str(config.get("interval", "hours")),
+    }
+    for name, config in settings.pipeline_live_defaults.items()
+}
+PIPELINE_LIVE_DEFAULTS = {
+    name: {
+        "enabled": entry["enabled"],
+        "interval": entry["interval"] if entry["interval"] in {"minutes", "hours", "days"} else "hours",
+    }
+    for name, entry in PIPELINE_LIVE_DEFAULTS.items()
+}
+VALID_PIPELINE_INTERVALS = {"minutes", "hours", "days"}
 DEFAULT_DASHBOARD_SETTINGS: Dict[str, Any] = {
     "schedule_profile": settings.agent_schedule_profile,
     "memory_prune_limit": settings.memory_prune_limit,
@@ -128,6 +144,7 @@ DEFAULT_DASHBOARD_SETTINGS: Dict[str, Any] = {
     "observation_interval": settings.observation_interval,
     "decision_interval": settings.decision_interval,
     "forecast_interval": settings.forecast_interval,
+    PIPELINE_LIVE_KEY: {name: value.copy() for name, value in PIPELINE_LIVE_DEFAULTS.items()},
 }
 
 
@@ -272,6 +289,53 @@ async def _save_dashboard_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     await redis_client.set_json(DASHBOARD_SETTINGS_KEY, merged)
     log.info("Dashboard settings updated: %s", payload)
     return merged
+
+
+async def _load_pipeline_live_config() -> Dict[str, Dict[str, Any]]:
+    """Load pipeline live-mode configuration with defaults."""
+    dashboard_settings = await _load_dashboard_settings()
+    stored = dashboard_settings.get(PIPELINE_LIVE_KEY) or {}
+    config: Dict[str, Dict[str, Any]] = {}
+    for name, defaults in PIPELINE_LIVE_DEFAULTS.items():
+        entry = stored.get(name, {})
+        enabled = bool(entry.get("enabled", defaults["enabled"]))
+        interval = str(entry.get("interval", defaults["interval"])).lower()
+        if interval not in VALID_PIPELINE_INTERVALS:
+            interval = defaults["interval"]
+        config[name] = {"enabled": enabled, "interval": interval}
+    return config
+
+
+async def _save_pipeline_live_config(updates: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Persist pipeline live-mode configuration with validation."""
+    if not isinstance(updates, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload; expected object.")
+
+    current = await _load_pipeline_live_config()
+
+    for name, override in updates.items():
+        if name not in PIPELINE_LIVE_DEFAULTS:
+            raise HTTPException(status_code=400, detail=f"Unknown pipeline '{name}'")
+        if not isinstance(override, dict):
+            raise HTTPException(status_code=400, detail=f"Invalid configuration for pipeline '{name}'")
+
+        if "enabled" in override:
+            current[name]["enabled"] = bool(override["enabled"])
+
+        if "interval" in override:
+            interval = str(override["interval"]).lower()
+            if interval not in VALID_PIPELINE_INTERVALS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid interval '{interval}' for pipeline '{name}'",
+                )
+            current[name]["interval"] = interval
+
+    stored = await redis_client.get_json(DASHBOARD_SETTINGS_KEY) or {}
+    stored[PIPELINE_LIVE_KEY] = current
+    await redis_client.set_json(DASHBOARD_SETTINGS_KEY, stored)
+    log.info("Pipeline live configuration updated: %s", updates)
+    return current
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -662,6 +726,30 @@ async def update_dashboard_settings(settings_payload: Dict[str, Any]):
     settings.decision_interval = merged.get("decision_interval", settings.decision_interval)
     settings.forecast_interval = merged.get("forecast_interval", settings.forecast_interval)
     return {"settings": merged}
+
+
+@app.get("/api/pipelines/live-config")
+@rate_limit(max_requests=30, window_seconds=60)
+async def get_pipeline_live_config():
+    """Return live-mode configuration for pipelines."""
+    config = await _load_pipeline_live_config()
+    return {
+        "pipelines": config,
+        "intervals": sorted(VALID_PIPELINE_INTERVALS),
+    }
+
+
+@app.post("/api/pipelines/live-config")
+@rate_limit(max_requests=30, window_seconds=60)
+async def update_pipeline_live_config(payload: Dict[str, Any]):
+    """Update live-mode configuration for pipelines."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid payload; expected object.")
+    updates = payload.get("pipelines")
+    if updates is None:
+        updates = payload
+    config = await _save_pipeline_live_config(updates)
+    return {"pipelines": config}
 
 
 @app.post("/api/review/run")

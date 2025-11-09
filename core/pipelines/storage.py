@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from core.logging import log
 from core.models import FactInsight, FusionRecommendation, TrendAssessment
 from core.redis_client import RedisClient
+from core.config import settings
+
+DASHBOARD_SETTINGS_KEY = "dashboard:settings"
+PIPELINE_LIVE_KEY = "pipeline_live_config"
+VALID_PIPELINE_INTERVALS = {"minutes", "hours", "days"}
 
 
 def _trend_key(ticker: str) -> str:
@@ -40,7 +45,11 @@ async def set_trend_assessment(
     ttl_seconds: int = 300,
 ) -> None:
     """Persist a trend assessment to Redis."""
-    await redis.set_json(_trend_key(assessment.ticker), assessment.dict(), expire=ttl_seconds)
+    await redis.set_json(
+        _trend_key(assessment.ticker),
+        assessment.model_dump(mode="json"),
+        expire=ttl_seconds,
+    )
 
 
 async def get_fact_insight(redis: RedisClient, ticker: Optional[str]) -> Optional[FactInsight]:
@@ -61,7 +70,11 @@ async def set_fact_insight(
     ttl_seconds: int = 3600,
 ) -> None:
     """Persist a fact insight to Redis."""
-    await redis.set_json(_fact_key(insight.ticker), insight.dict(), expire=ttl_seconds)
+    await redis.set_json(
+        _fact_key(insight.ticker),
+        insight.model_dump(mode="json"),
+        expire=ttl_seconds,
+    )
 
 
 async def get_fusion_recommendation(redis: RedisClient, ticker: str) -> Optional[FusionRecommendation]:
@@ -82,10 +95,44 @@ async def set_fusion_recommendation(
     ttl_seconds: int = 300,
 ) -> None:
     """Persist a fusion recommendation to Redis."""
-    await redis.set_json(_fusion_key(recommendation.ticker), recommendation.dict(), expire=ttl_seconds)
+    await redis.set_json(
+        _fusion_key(recommendation.ticker),
+        recommendation.model_dump(mode="json"),
+        expire=ttl_seconds,
+    )
 
 
 def is_stale(generated_at: datetime, ttl_seconds: int) -> bool:
     """Return True when the generated_at timestamp is older than ttl window."""
     return datetime.utcnow() - generated_at >= timedelta(seconds=max(ttl_seconds, 1))
+
+
+def pipeline_interval_to_seconds(pipeline: str, interval: str) -> int:
+    """Resolve configured interval label to seconds for a given pipeline."""
+    mapping = settings.pipeline_live_interval_seconds.get(pipeline, {})
+    fallback = mapping.get("hours") or 3600
+    return int(mapping.get(interval, fallback))
+
+
+async def get_pipeline_live_entry(redis: RedisClient, pipeline: str) -> Dict[str, Any]:
+    """Fetch live-mode configuration for a pipeline from Redis with defaults."""
+    defaults = settings.pipeline_live_defaults.get(pipeline, {"enabled": False, "interval": "hours"})
+    try:
+        dashboard_settings = await redis.get_json(DASHBOARD_SETTINGS_KEY) or {}
+    except Exception:  # pragma: no cover - redis connectivity issues
+        dashboard_settings = {}
+
+    live_config = dashboard_settings.get(PIPELINE_LIVE_KEY) or {}
+    entry = live_config.get(pipeline, {})
+
+    interval = str(entry.get("interval", defaults.get("interval", "hours"))).lower()
+    if interval not in VALID_PIPELINE_INTERVALS:
+        interval = str(defaults.get("interval", "hours")).lower()
+
+    resolved = {
+        "enabled": bool(entry.get("enabled", defaults.get("enabled", False))),
+        "interval": interval,
+    }
+    resolved["seconds"] = pipeline_interval_to_seconds(pipeline, interval)
+    return resolved
 

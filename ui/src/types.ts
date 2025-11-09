@@ -138,6 +138,14 @@ export interface DashboardSettings {
   forecast_interval: string;
 }
 
+export interface PipelineLiveEntry {
+  enabled: boolean;
+  interval: string;
+  seconds?: number;
+}
+
+export type PipelineLiveConfig = Record<string, PipelineLiveEntry>;
+
 export interface TradeRecord {
   trade_id: string;
   ticker: string;

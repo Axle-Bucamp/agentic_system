@@ -12,6 +12,7 @@ import {
   TradeRecord,
   AgentRewardResponse,
   PortfolioTradesResponse,
+  PipelineLiveConfig,
 } from "./types";
 
 async function fetchJSON<T>(url: string): Promise<T> {
@@ -135,4 +136,10 @@ export const getPortfolioTrades = (limit = 20, offset = 0) =>
   );
 
 export const getAgentRewards = () => fetchJSON<AgentRewardResponse>("/api/agents/rewards");
+
+export const getPipelineLiveConfig = () =>
+  fetchJSON<{ pipelines: PipelineLiveConfig; intervals: string[] }>("/api/pipelines/live-config");
+
+export const updatePipelineLiveConfig = (payload: Record<string, { enabled?: boolean; interval?: string }>) =>
+  postJSON<{ pipelines: PipelineLiveConfig }>("/api/pipelines/live-config", { pipelines: payload });
 

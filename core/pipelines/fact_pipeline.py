@@ -1,15 +1,10 @@
 """Fact pipeline that fuses news, sentiment, and research insights."""
 from __future__ import annotations
 
-import asyncio
 import json
-import math
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote_plus, urlparse
-from uuid import uuid4
 
 import httpx
 
@@ -18,6 +13,12 @@ from core.logging import log
 from core.models import FactInsight, NewsMemoryEntry
 from core.pipelines.storage import set_fact_insight
 from core.redis_client import RedisClient
+from core.research import (
+    fetch_arxiv_entries,
+    fetch_coin_bureau_updates,
+    fetch_google_scholar_entries,
+    fetch_yahoo_finance_headlines,
+)
 
 
 @dataclass
@@ -28,7 +29,7 @@ class SentimentSnapshot:
 
 
 RESEARCH_CACHE_KEY = "pipeline:fact:research:{ticker}"
-RESEARCH_CACHE_VERSION = 2
+RESEARCH_CACHE_VERSION = 3
 
 
 class FactPipeline:
@@ -137,9 +138,17 @@ class FactPipeline:
         if arxiv_entries:
             entries.extend(arxiv_entries)
 
-        deep_research_entries = await self._fetch_deep_research(ticker)
-        if deep_research_entries:
-            entries.extend(deep_research_entries)
+        scholar_entries = await self._fetch_google_scholar_research(ticker)
+        if scholar_entries:
+            entries.extend(scholar_entries)
+
+        coin_bureau_entries = await self._fetch_coin_bureau_research(ticker)
+        if coin_bureau_entries:
+            entries.extend(coin_bureau_entries)
+
+        yahoo_entries = await self._fetch_yahoo_finance_research(ticker)
+        if yahoo_entries:
+            entries.extend(yahoo_entries)
 
         if entries:
             await self.redis.set_json(
@@ -153,132 +162,94 @@ class FactPipeline:
     async def _fetch_arxiv_research(self, ticker: str) -> List[Dict[str, Any]]:
         try:
             client = await self._client_instance()
-            query = quote_plus(f'all:"{ticker}" AND (ti:crypto OR ti:blockchain)')
-            url = f"https://export.arxiv.org/api/query?search_query={query}&sortBy=submittedDate&max_results=3"
-            response = await client.get(url)
-            response.raise_for_status()
-            return self._parse_arxiv_feed(response.text)
-        except Exception as exc:  # pragma: no cover - external dependency best-effort
+            query = f'all:"{ticker}" AND (ti:crypto OR ti:blockchain OR abs:"{ticker}")'
+            results = await fetch_arxiv_entries(client, query, limit=5)
+        except Exception as exc:  # pragma: no cover
             log.debug("Unable to fetch arXiv research for %s: %s", ticker, exc)
             return []
 
-    async def _fetch_deep_research(self, ticker: str) -> List[Dict[str, Any]]:
-        if not settings.deep_research_mcp_url:
-            return []
+        ticker_upper = ticker.upper()
+        filtered = []
+        for entry in results:
+            content = f"{entry.get('title', '')} {entry.get('summary', '')}".upper()
+            if ticker_upper in content:
+                filtered.append(entry)
+        return filtered or results
 
+    async def _fetch_google_scholar_research(self, ticker: str) -> List[Dict[str, Any]]:
         try:
             client = await self._client_instance()
-            payload = {
-                "jsonrpc": "2.0",
-                "id": str(uuid4()),
-                "method": "tools/call",
-                "params": {
-                    "name": "deep-research",
-                    "arguments": {
-                        "query": f"Latest developments affecting {ticker} cryptocurrency and blockchain adoption",
-                        "depth": max(1, min(5, settings.deep_research_depth)),
-                        "breadth": max(1, min(5, settings.deep_research_breadth)),
-                    },
-                },
-            }
-            if settings.deep_research_model:
-                payload["params"]["arguments"]["model"] = settings.deep_research_model
-            if settings.deep_research_source_preferences:
-                payload["params"]["arguments"]["sourcePreferences"] = settings.deep_research_source_preferences
-
-            timeout = settings.deep_research_timeout_seconds or 120
-            response = await client.post(
-                settings.deep_research_mcp_url,
-                json=payload,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-        except Exception as exc:  # pragma: no cover - external dependency best-effort
-            log.debug("Deep research MCP call failed for %s: %s", ticker, exc)
+            query = f'"{ticker}" cryptocurrency OR "{ticker}" blockchain adoption'
+            results = await fetch_google_scholar_entries(client, query, limit=5)
+        except Exception as exc:  # pragma: no cover
+            log.debug("Unable to fetch Google Scholar research for %s: %s", ticker, exc)
             return []
 
+        ticker_upper = ticker.upper()
+        filtered: List[Dict[str, Any]] = []
+        for entry in results:
+            content = f"{entry.get('title', '')} {entry.get('summary', '')}".upper()
+            if ticker_upper in content:
+                filtered.append(entry)
+        return filtered or results[:3]
+
+    async def _fetch_coin_bureau_research(self, ticker: str) -> List[Dict[str, Any]]:
         try:
-            data = response.json()
-        except ValueError:
-            log.debug("Deep research MCP response was not JSON for %s", ticker)
+            client = await self._client_instance()
+            updates = await fetch_coin_bureau_updates(client, limit=12)
+        except Exception as exc:  # pragma: no cover
+            log.debug("Unable to fetch Coin Bureau updates for %s: %s", ticker, exc)
             return []
 
-        result = data.get("result") or {}
-        content = result.get("content") or []
-        summary_text = ""
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                summary_text = item.get("text", "")
-                break
-        metadata = result.get("metadata") or {}
-        visited = metadata.get("visitedUrls") or []
-        learnings = metadata.get("learnings") or []
-
-        if not summary_text and not visited:
-            return []
-
+        ticker_upper = ticker.upper()
         entries: List[Dict[str, Any]] = []
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        first_url = next((u for u in visited if isinstance(u, str) and u.startswith("http")), None)
-
-        if summary_text:
-            entries.append(
-                {
-                    "title": f"Deep research findings for {ticker}",
-                    "url": first_url,
-                    "source": "DeepResearch",
-                    "summary": self._truncate(summary_text, 600),
-                    "published_at": timestamp,
-                }
-            )
-
-        for idx, url in enumerate(visited[:5]):
-            if not isinstance(url, str):
+        for item in updates:
+            title = item.get("title", "")
+            if ticker_upper not in title.upper():
                 continue
-            domain = urlparse(url).netloc if url.startswith("http") else ""
-            title = None
-            if isinstance(learnings, list) and idx < len(learnings):
-                learning = learnings[idx]
-                if isinstance(learning, str):
-                    title = learning[:140]
-            entries.append(
-                {
-                    "title": title or f"Research source #{idx + 1}",
-                    "url": url,
-                    "source": domain or "DeepResearch",
-                    "summary": None,
-                    "published_at": timestamp,
-                }
-            )
-
-        return entries
-
-    def _parse_arxiv_feed(self, feed_text: str) -> List[Dict[str, Any]]:
-        entries: List[Dict[str, Any]] = []
-        try:
-            root = ET.fromstring(feed_text)
-        except ET.ParseError:
-            return entries
-
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
-        for entry in root.findall("atom:entry", ns):
-            title = entry.findtext("atom:title", default="", namespaces=ns).strip()
-            summary = entry.findtext("atom:summary", default="", namespaces=ns).strip()
-            link_el = entry.find("atom:link", ns)
-            link = link_el.attrib.get("href") if link_el is not None else None
-            published = entry.findtext("atom:published", default="", namespaces=ns)
-
+            weight = settings.news_source_weights.get("coin_bureau", 0.1)
             entries.append(
                 {
                     "title": title,
-                    "url": link,
-                    "source": "arXiv",
-                    "summary": summary[:280],
-                    "published_at": published,
+                    "url": item.get("url"),
+                    "source": "Coin Bureau (Video)",
+                    "summary": "Coin Bureau coverage relevant to the asset.",
+                    "published_at": item.get("published_at"),
+                    "source_key": "coin_bureau",
+                    "source_weight": weight,
                 }
             )
-        return entries
+        return entries[:3]
+
+    async def _fetch_yahoo_finance_research(self, ticker: str) -> List[Dict[str, Any]]:
+        try:
+            client = await self._client_instance()
+            results = await fetch_yahoo_finance_headlines(
+                client, tickers=[f"{ticker}-USD", ticker], limit=6
+            )
+        except Exception as exc:  # pragma: no cover
+            log.debug("Unable to fetch Yahoo Finance headlines for %s: %s", ticker, exc)
+            return []
+
+        ticker_upper = ticker.upper()
+        entries: List[Dict[str, Any]] = []
+        for item in results:
+            title = item.get("title", "")
+            if ticker_upper not in title.upper():
+                continue
+            weight = settings.news_source_weights.get("yahoo_finance", 0.1)
+            entries.append(
+                {
+                    "title": title,
+                    "url": item.get("url"),
+                    "source": "Yahoo Finance",
+                    "summary": item.get("summary"),
+                    "published_at": item.get("published_at"),
+                    "source_key": "yahoo_finance",
+                    "source_weight": weight,
+                }
+            )
+        return entries[:3]
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:

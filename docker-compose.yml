@@ -19,9 +19,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-
-  # future -> logfire for logging
-
   # PostgreSQL for persistent storage
   postgres:
     image: postgres:16-alpine
@@ -161,17 +158,11 @@ services:
       - CHAT_AGENT_PROMPT=${CHAT_AGENT_PROMPT:-}
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-trading-api}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
-      - DEEP_RESEARCH_MCP_URL=${DEEP_RESEARCH_MCP_URL:-http://deep-research:3000/mcp}
-      - DEEP_RESEARCH_DEPTH=${DEEP_RESEARCH_DEPTH:-2}
-      - DEEP_RESEARCH_BREADTH=${DEEP_RESEARCH_BREADTH:-2}
-      - DEEP_RESEARCH_MODEL=${DEEP_RESEARCH_MODEL:-}
-      - DEEP_RESEARCH_SOURCE_PREFERENCES=${DEEP_RESEARCH_SOURCE_PREFERENCES:-}
-      - DEEP_RESEARCH_TIMEOUT_SECONDS=${DEEP_RESEARCH_TIMEOUT_SECONDS:-120}
       - FAKE_TRADING=true
       - INITIAL_CAPITAL=1000.0
       - MAX_POSITION_SIZE=0.20
       - ENVIRONMENT=development
-      - USE_MOCK_SERVICES=true
+      - USE_MOCK_SERVICES=${USE_MOCK_SERVICES:-false}
       - SENTRY_DSN=${SENTRY_DSN}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-change-in-production}
       - RATE_LIMIT_REDIS_URL=redis://redis:6379/1
@@ -200,11 +191,10 @@ services:
 
   # Memory Agent Service
   memory-agent:
+    image: agentic_system/agent-base:latest
     build:
       context: .
       dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: memory
     container_name: ats-memory-agent
     env_file:
       - .env
@@ -227,12 +217,6 @@ services:
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-memory-agent}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - AGENT_NAME=memory
-      - DEEP_RESEARCH_MCP_URL=${DEEP_RESEARCH_MCP_URL:-http://deep-research:3000/mcp}
-      - DEEP_RESEARCH_DEPTH=${DEEP_RESEARCH_DEPTH:-2}
-      - DEEP_RESEARCH_BREADTH=${DEEP_RESEARCH_BREADTH:-2}
-      - DEEP_RESEARCH_MODEL=${DEEP_RESEARCH_MODEL:-}
-      - DEEP_RESEARCH_SOURCE_PREFERENCES=${DEEP_RESEARCH_SOURCE_PREFERENCES:-}
-      - DEEP_RESEARCH_TIMEOUT_SECONDS=${DEEP_RESEARCH_TIMEOUT_SECONDS:-120}
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
@@ -245,11 +229,7 @@ services:
 
   # DQN Decision Agent Service
   dqn-agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: dqn
+    image: agentic_system/agent-base:latest
     container_name: ats-dqn-agent
     env_file:
       - .env
@@ -270,11 +250,7 @@ services:
 
   # Chart Analysis Agent Service
   chart-agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: chart
+    image: agentic_system/agent-base:latest
     container_name: ats-chart-agent
     env_file:
       - .env
@@ -296,11 +272,7 @@ services:
 
   # Risk Analysis Agent Service
   risk-agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: risk
+    image: agentic_system/agent-base:latest
     container_name: ats-risk-agent
     env_file:
       - .env
@@ -330,11 +302,7 @@ services:
 
   # News Feed Agent Service
   news-agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: news
+    image: agentic_system/agent-base:latest
     container_name: ats-news-agent
     env_file:
       - .env
@@ -349,12 +317,6 @@ services:
       - ARXIV_ENABLED=${ARXIV_ENABLED:-true}
       - FIRECRAWL_BASE_URL=${FIRECRAWL_BASE_URL:-https://api.firecrawl.dev}
       - FIRECRAWL_KEY=${FIRECRAWL_KEY:-}
-      - DEEP_RESEARCH_MCP_URL=${DEEP_RESEARCH_MCP_URL:-http://deep-research:3000/mcp}
-      - DEEP_RESEARCH_DEPTH=${DEEP_RESEARCH_DEPTH:-2}
-      - DEEP_RESEARCH_BREADTH=${DEEP_RESEARCH_BREADTH:-2}
-      - DEEP_RESEARCH_MODEL=${DEEP_RESEARCH_MODEL:-}
-      - DEEP_RESEARCH_SOURCE_PREFERENCES=${DEEP_RESEARCH_SOURCE_PREFERENCES:-}
-      - DEEP_RESEARCH_TIMEOUT_SECONDS=${DEEP_RESEARCH_TIMEOUT_SECONDS:-120}
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-news-agent}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
@@ -367,11 +329,7 @@ services:
 
   # Copy Trade Agent Service
   copytrade-agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: copytrade
+    image: agentic_system/agent-base:latest
     container_name: ats-copytrade-agent
     env_file:
       - .env
@@ -401,11 +359,7 @@ services:
 
   # Orchestrator Agent Service (Legacy)
   orchestrator:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: orchestrator
+    image: agentic_system/agent-base:latest
     container_name: ats-orchestrator
     env_file:
       - .env
@@ -431,12 +385,6 @@ services:
       - REVIEW_PROMPT_DEFAULT=${REVIEW_PROMPT_DEFAULT:-}
       - CHAT_AGENT_MODEL=${CHAT_AGENT_MODEL:-}
       - CHAT_AGENT_PROMPT=${CHAT_AGENT_PROMPT:-}
-      - DEEP_RESEARCH_MCP_URL=${DEEP_RESEARCH_MCP_URL:-http://deep-research:3000/mcp}
-      - DEEP_RESEARCH_DEPTH=${DEEP_RESEARCH_DEPTH:-2}
-      - DEEP_RESEARCH_BREADTH=${DEEP_RESEARCH_BREADTH:-2}
-      - DEEP_RESEARCH_MODEL=${DEEP_RESEARCH_MODEL:-}
-      - DEEP_RESEARCH_SOURCE_PREFERENCES=${DEEP_RESEARCH_SOURCE_PREFERENCES:-}
-      - DEEP_RESEARCH_TIMEOUT_SECONDS=${DEEP_RESEARCH_TIMEOUT_SECONDS:-120}
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-orchestrator}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
@@ -465,11 +413,7 @@ services:
 
   # Workforce Orchestrator Service (CAMEL-based)
   workforce-orchestrator:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: workforce
+    image: agentic_system/agent-base:latest
     container_name: ats-workforce-orchestrator
     env_file:
       - .env
@@ -504,12 +448,6 @@ services:
       - REVIEW_PROMPT_DEFAULT=${REVIEW_PROMPT_DEFAULT:-}
       - CHAT_AGENT_MODEL=${CHAT_AGENT_MODEL:-}
       - CHAT_AGENT_PROMPT=${CHAT_AGENT_PROMPT:-}
-      - DEEP_RESEARCH_MCP_URL=${DEEP_RESEARCH_MCP_URL:-http://deep-research:3000/mcp}
-      - DEEP_RESEARCH_DEPTH=${DEEP_RESEARCH_DEPTH:-2}
-      - DEEP_RESEARCH_BREADTH=${DEEP_RESEARCH_BREADTH:-2}
-      - DEEP_RESEARCH_MODEL=${DEEP_RESEARCH_MODEL:-}
-      - DEEP_RESEARCH_SOURCE_PREFERENCES=${DEEP_RESEARCH_SOURCE_PREFERENCES:-}
-      - DEEP_RESEARCH_TIMEOUT_SECONDS=${DEEP_RESEARCH_TIMEOUT_SECONDS:-120}
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-workforce}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - AGENT_NAME=workforce
@@ -594,30 +532,6 @@ services:
       - ./config/tools-proxy.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "8085:80"
-    restart: unless-stopped
-    networks:
-      - ats-network
-
-  deep-research:
-    build:
-      context: ./deep-research-mcp
-      dockerfile: Dockerfile
-    container_name: ats-deep-research
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_ENDPOINT=${OPENAI_ENDPOINT:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - XAI_API_KEY=${XAI_API_KEY:-}
-      - FIRECRAWL_BASE_URL=${FIRECRAWL_BASE_URL:-}
-      - FIRECRAWL_KEY=${FIRECRAWL_KEY:-}
-      - FIRECRAWL_CONCURRENCY=${FIRECRAWL_CONCURRENCY:-2}
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
-    ports:
-      - "3300:3000"
-    tty: true
-    stdin_open: true
     restart: unless-stopped
     networks:
       - ats-network

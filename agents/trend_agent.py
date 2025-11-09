@@ -8,7 +8,7 @@ from agents.base_agent import BaseAgent
 from core import asset_registry
 from core.logging import log
 from core.models import AgentSignal, AgentType, SignalType
-from core.pipelines import TrendPipeline, get_trend_assessment
+from core.pipelines import TrendPipeline, get_trend_assessment, get_pipeline_live_entry
 from core.pipelines.storage import is_stale
 
 
@@ -18,6 +18,7 @@ class TrendAgent(BaseAgent):
     def __init__(self, redis_client):
         super().__init__(AgentType.TREND, redis_client)
         self.pipeline = TrendPipeline(redis_client)
+        self._cycle_interval_seconds = self.pipeline.ttl_seconds
 
     async def initialize(self):
         log.info("Trend Agent initialized (fusing DQN + chart signals)")
@@ -28,6 +29,14 @@ class TrendAgent(BaseAgent):
 
     async def run_cycle(self):
         log.debug("Trend Agent running cycle...")
+
+        config = await get_pipeline_live_entry(self.redis, "trend")
+        if not config["enabled"]:
+            log.debug("Trend pipeline live-mode disabled; skipping cycle.")
+            return
+
+        self.pipeline.ttl_seconds = max(config["seconds"], 60)
+        self._cycle_interval_seconds = self.pipeline.ttl_seconds
 
         for ticker in asset_registry.get_assets():
             try:
@@ -53,7 +62,7 @@ class TrendAgent(BaseAgent):
                 log.error("Trend Agent error for %s: %s", ticker, exc)
 
     def get_cycle_interval(self) -> int:
-        return self.pipeline.ttl_seconds
+        return self._cycle_interval_seconds
 
     def _build_reasoning(self, data: dict) -> str:
         trend_score = data.get("trend_score")

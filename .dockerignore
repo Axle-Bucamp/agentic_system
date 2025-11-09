@@ -80,3 +80,13 @@ data/
 tmp/
 temp/
 .tmp/
+
+# Build artifacts
+build/
+dist/
+
+# Frontend build cache
+ui/node_modules/
+ui/dist/
+ui/.cache/
+ui/.vite/

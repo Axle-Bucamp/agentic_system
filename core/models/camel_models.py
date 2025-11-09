@@ -102,23 +102,6 @@ class CamelModelFactory:
             model_platform = cls._resolve_platform(model_name)
             model = _build_model(model_type, model_platform, api_key)
 
-            fallback_factory: Optional[Callable[[], Any]] = None
-            fallback_name = None
-            if cls._should_prepare_fallback(model_name):
-                fallback_name = settings.camel_fallback_model
-                fallback_factory = cls._build_fallback_factory(
-                    fallback_name=fallback_name,
-                    build_fn=_build_model,
-                )
-
-            if fallback_factory:
-                model = _FallbackModelWrapper(
-                    primary=model,
-                    fallback_factory=fallback_factory,
-                    primary_name=model_name,
-                    fallback_name=fallback_name or "gpt-4o-mini",
-                )
-
             cls._model_cache[cache_key] = model
             log.info(f"Created CAMEL model: {model_name}")
             return model
@@ -138,6 +121,32 @@ class CamelModelFactory:
                     return fallback
 
             raise
+
+    @classmethod
+    def create_coordinator_model(cls) -> Any:
+        """Create model for coordinator agents in CAMEL workforce."""
+        model_name = settings.camel_coordinator_model or settings.camel_default_model
+        api_key = cls._resolve_api_key(model_name)
+        return cls.create_model(model_name=model_name, api_key=api_key)
+
+    @classmethod
+    def create_task_model(cls) -> Any:
+        """Create model for task decomposition agents."""
+        model_name = settings.camel_task_model or settings.camel_default_model
+        api_key = cls._resolve_api_key(model_name)
+        return cls.create_model(model_name=model_name, api_key=api_key)
+
+    @classmethod
+    def create_worker_model(cls) -> Any:
+        """Create model for workforce workers."""
+        model_name = settings.camel_worker_model or settings.camel_default_model
+        api_key = cls._resolve_api_key(model_name)
+        return cls.create_model(model_name=model_name, api_key=api_key)
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        cls._model_cache.clear()
+        log.info("CAMEL model cache cleared")
 
     @classmethod
     def _resolve_model_name(cls, requested: str) -> str:
@@ -246,81 +255,3 @@ class CamelModelFactory:
             except Exception as fallback_error:
                 log.error("Immediate fallback creation failed: %s", fallback_error)
         return None
-
-
-class _FallbackModelWrapper:
-    """Wrap CAMEL model to attempt seamless fallback on runtime errors."""
-
-    def __init__(
-        self,
-        primary: Any,
-        fallback_factory: Optional[Callable[[], Any]],
-        primary_name: str,
-        fallback_name: str,
-    ) -> None:
-        self._primary = primary
-        self._active = primary
-        self._fallback_factory = fallback_factory
-        self._fallback_name = fallback_name
-        self._primary_name = primary_name
-        self._has_switched = False
-
-    def run(self, *args: Any, **kwargs: Any) -> Any:
-        try:
-            return self._active.run(*args, **kwargs)
-        except Exception as exc:
-            if self._has_switched or self._fallback_factory is None:
-                raise
-
-            log.warning(
-                "Primary CAMEL model '%s' raised %s; switching to fallback '%s'.",
-                self._primary_name,
-                exc.__class__.__name__,
-                self._fallback_name,
-            )
-            self._active = self._fallback_factory()
-            self._has_switched = True
-            return self._active.run(*args, **kwargs)
-
-    def __getattr__(self, item: str) -> Any:
-        return getattr(self._active, item)
-    
-    @classmethod
-    def create_coordinator_model(cls) -> Any:
-        """Create model for coordinator agent."""
-        model_name = settings.camel_coordinator_model
-        # Use Gemini API key if model is Gemini, otherwise OpenAI
-        api_key = settings.gemini_api_key if "gemini" in model_name.lower() else settings.openai_api_key
-        return cls.create_model(
-            model_name=model_name,
-            api_key=api_key
-        )
-    
-    @classmethod
-    def create_task_model(cls) -> Any:
-        """Create model for task decomposition agent."""
-        model_name = settings.camel_task_model
-        # Use Gemini API key if model is Gemini, otherwise OpenAI
-        api_key = settings.gemini_api_key if "gemini" in model_name.lower() else settings.openai_api_key
-        return cls.create_model(
-            model_name=model_name,
-            api_key=api_key
-        )
-    
-    @classmethod
-    def create_worker_model(cls) -> Any:
-        """Create model for worker agents."""
-        model_name = settings.camel_worker_model
-        # Use Gemini API key if model is Gemini, otherwise OpenAI
-        api_key = settings.gemini_api_key if "gemini" in model_name.lower() else settings.openai_api_key
-        return cls.create_model(
-            model_name=model_name,
-            api_key=api_key
-        )
-    
-    @classmethod
-    def clear_cache(cls):
-        """Clear the model cache."""
-        cls._model_cache.clear()
-        log.info("Model cache cleared")
-

@@ -32,14 +32,22 @@ class ForecastingClient:
         self.cache_ttl: Dict[str, datetime] = {}
         self.default_cache_ttl = timedelta(minutes=5)
         
-        # Mock mode
-        self.is_mock = config.get("mock_mode", config.get("use_mock_services", True))
+        # Mock mode (explicit flag preferred, falls back to legacy config flag)
+        mock_mode = config.get("mock_mode")
+        if mock_mode is None:
+            mock_mode = bool(config.get("use_mock_services", False))
+        self.is_mock = bool(mock_mode)
         self.mock_data: Dict[str, Any] = {}
         self.mock_service = None
     
     async def connect(self) -> None:
         """Initialize the HTTP client."""
         try:
+            if not self.is_mock and not self.api_key:
+                raise ForecastingAPIError(
+                    "Forecasting API key is required when mock_mode is disabled."
+                )
+
             headers = {
                 "Content-Type": "application/json",
                 "User-Agent": "AgenticTradingSystem/1.0.0"
@@ -101,6 +109,88 @@ class ForecastingClient:
             }
         }
     
+    def _normalise_ohlc_entry(self, entry: Any) -> Optional[Dict[str, Any]]:
+        """Normalise a single OHLC candle from external API responses."""
+        if not isinstance(entry, dict):
+            return None
+
+        lowered = {str(key).lower(): value for key, value in entry.items()}
+
+        timestamp = None
+        for key, value in entry.items():
+            if str(key).lower() in {"timestamp", "time", "date"}:
+                timestamp = value
+                break
+        if not timestamp:
+            return None
+
+        def to_float(value: Any) -> Optional[float]:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        normalised = {
+            "timestamp": timestamp,
+            "open": to_float(lowered.get("open")),
+            "high": to_float(lowered.get("high")),
+            "low": to_float(lowered.get("low")),
+            "close": to_float(lowered.get("close")),
+            "volume": to_float(lowered.get("volume")) or 0.0,
+        }
+
+        if any(normalised.get(field) is None for field in ("open", "high", "low", "close")):
+            return None
+
+        return normalised
+
+    def _normalise_forecast_entry(self, ticker: str, interval: str, entry: Any) -> Optional[Dict[str, Any]]:
+        """Normalise forecast entries returned by the forecasting API."""
+        if not isinstance(entry, dict):
+            return None
+
+        lowered = {str(key).lower(): value for key, value in entry.items()}
+
+        timestamp = None
+        for key, value in entry.items():
+            if str(key).lower() in {"timestamp", "time", "date"}:
+                timestamp = value
+                break
+        prediction_time = entry.get("pred_date") or entry.get("prediction_time")
+
+        def to_float(value: Any) -> Optional[float]:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        forecast_value = to_float(
+            lowered.get("forecasting")
+            or lowered.get("forecast")
+            or lowered.get("prediction")
+        )
+        close_value = to_float(lowered.get("close"))
+
+        if not timestamp and not prediction_time:
+            return None
+
+        normalised = {
+            "ticker": ticker,
+            "interval": interval,
+            "timestamp": timestamp,
+            "prediction_time": prediction_time,
+            "forecast": forecast_value,
+            "price": forecast_value,
+            "close": close_value,
+        }
+
+        # Preserve any additional attributes for transparency/debugging.
+        for key, value in entry.items():
+            if key not in normalised:
+                normalised[key] = value
+
+        return normalised
+
     async def _make_request(
         self,
         method: str,
@@ -263,6 +353,8 @@ class ForecastingClient:
         else:
             try:
                 response = await self._make_request("GET", f"/api/json/action/{ticker}/{interval}")
+                if isinstance(response, dict) and "forecast" in response and "forecast_price" not in response:
+                    response = {**response, "forecast_price": response.get("forecast")}
                 result = response
             except Exception as e:
                 log.error(f"Failed to get action recommendation for {ticker}/{interval}: {e}")
@@ -309,7 +401,44 @@ class ForecastingClient:
         else:
             try:
                 response = await self._make_request("GET", f"/api/json/stock/{interval}/{ticker}")
-                result = response
+                if isinstance(response, list):
+                    normalised = [
+                        record
+                        for record in (
+                            self._normalise_forecast_entry(ticker, interval, item)
+                            for item in response
+                        )
+                        if record
+                    ]
+                    forecast_price = None
+                    for record in reversed(normalised):
+                        if record.get("forecast") is not None:
+                            forecast_price = record["forecast"]
+                            break
+
+                    result = {
+                        "ticker": ticker,
+                        "interval": interval,
+                        "forecast_price": forecast_price,
+                        "forecast_data": normalised,
+                    }
+                elif isinstance(response, dict):
+                    if "forecast_price" not in response:
+                        forecast_val = response.get("forecast") or response.get("forecasting")
+                        if forecast_val is not None:
+                            try:
+                                forecast_val = float(forecast_val)
+                            except (TypeError, ValueError):
+                                forecast_val = None
+                        response = {**response, "forecast_price": forecast_val}
+                    result = response
+                else:
+                    result = {
+                        "ticker": ticker,
+                        "interval": interval,
+                        "forecast_price": None,
+                        "forecast_data": [],
+                    }
             except Exception as e:
                 log.error(f"Failed to get stock forecast for {ticker}/{interval}: {e}")
                 raise ForecastingAPIError(f"Failed to get stock forecast: {e}")
@@ -384,8 +513,22 @@ class ForecastingClient:
                 log.error("Failed to fetch OHLC for {}/{}: {}", ticker, interval, e)
                 raise ForecastingAPIError(f"Failed to fetch OHLC data: {e}")
 
-        self._set_cache(cache_key, candles, timedelta(minutes=2))
-        return candles
+        normalised = [
+            record
+            for record in (self._normalise_ohlc_entry(item) for item in candles)
+            if record
+        ]
+
+        if not normalised:
+            log.debug(
+                "Unable to normalise OHLC data for %s/%s (received %d raw items)",
+                ticker,
+                interval,
+                len(candles),
+            )
+
+        self._set_cache(cache_key, normalised, timedelta(minutes=2))
+        return normalised
     
     async def get_available_intervals(self) -> List[str]:
         """Get list of available intervals."""

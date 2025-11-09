@@ -24,7 +24,7 @@ from core.models import (
     TradeAction,
     TradeMemoryEntry,
 )
-from core.pipelines import MemoryPruningPipeline, WeightReviewPipeline
+from core.pipelines import MemoryPruningPipeline, WeightReviewPipeline, get_pipeline_live_entry
 
 PENDING_REWARD_KEY = "memory:pending_trade_rewards"
 
@@ -47,6 +47,7 @@ class MemoryAgent(BaseAgent):
         self.pruning_pipeline: Optional[MemoryPruningPipeline] = None
         self.weight_review_pipeline: Optional[WeightReviewPipeline] = None
         self._last_review_run: datetime = datetime.min
+        self._last_prune_run: datetime = datetime.min
 
     async def initialize(self):
         """Initialize memory subsystems."""
@@ -395,7 +396,8 @@ class MemoryAgent(BaseAgent):
             f"{ticker}:{summary}:{news_timestamp.isoformat()}".encode("utf-8")
         ).hexdigest()
 
-        weight = self._compute_news_weight(news_timestamp, confidence)
+        source_weight = self._safe_float(news_data.get("source_weight"), default=0.1) or 0.1
+        weight = self._compute_news_weight(news_timestamp, confidence) * max(source_weight, 0.05)
         entry = NewsMemoryEntry(
             news_id=news_id,
             ticker=ticker,
@@ -404,7 +406,7 @@ class MemoryAgent(BaseAgent):
             summary=summary,
             sources=sources,
             weight=weight,
-            metadata={"raw": news_data},
+            metadata={"raw": news_data, "source_weight": source_weight},
             timestamp=news_timestamp,
         )
 
@@ -631,8 +633,19 @@ class MemoryAgent(BaseAgent):
     async def _prune_memories_if_needed(self) -> None:
         if not self.pruning_pipeline:
             return
+
+        config = await get_pipeline_live_entry(self.redis, "prune")
+        if not config["enabled"]:
+            log.debug("Memory pruning live-mode disabled; skipping run.")
+            return
+
+        interval_seconds = max(config["seconds"], 300)
+        if datetime.utcnow() - self._last_prune_run < timedelta(seconds=interval_seconds):
+            return
+
         try:
             await self.pruning_pipeline.prune_all()
+            self._last_prune_run = datetime.utcnow()
         except Exception as exc:  # pragma: no cover
             log.debug("Memory pruning skipped: %s", exc)
 

@@ -7,7 +7,7 @@ from agents.base_agent import BaseAgent
 from core import asset_registry
 from core.logging import log
 from core.models import AgentSignal, AgentType, SignalType, TradeAction
-from core.pipelines import FactPipeline, get_fact_insight
+from core.pipelines import FactPipeline, get_fact_insight, get_pipeline_live_entry
 from core.pipelines.storage import is_stale
 
 
@@ -17,6 +17,7 @@ class FactAgent(BaseAgent):
     def __init__(self, redis_client):
         super().__init__(AgentType.FACT, redis_client)
         self.pipeline = FactPipeline(redis_client)
+        self._cycle_interval_seconds = max(self.pipeline.ttl_seconds, 900)
 
     async def initialize(self):
         log.info("Fact Agent initialized (news + deep research fusion)")
@@ -31,6 +32,14 @@ class FactAgent(BaseAgent):
 
     async def run_cycle(self):
         log.debug("Fact Agent running cycle...")
+
+        config = await get_pipeline_live_entry(self.redis, "fact")
+        if not config["enabled"]:
+            log.debug("Fact pipeline live-mode disabled; skipping cycle.")
+            return
+
+        self.pipeline.ttl_seconds = max(config["seconds"], 300)
+        self._cycle_interval_seconds = self.pipeline.ttl_seconds
 
         for ticker in asset_registry.get_assets():
             try:
@@ -59,7 +68,7 @@ class FactAgent(BaseAgent):
                 log.error("Fact Agent error for %s: %s", ticker, exc)
 
     def get_cycle_interval(self) -> int:
-        return max(self.pipeline.ttl_seconds, 900)
+        return self._cycle_interval_seconds
 
     def _derive_action(self, sentiment: float) -> TradeAction:
         if sentiment > 0.2:

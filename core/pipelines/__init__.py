@@ -7,6 +7,8 @@ from .storage import (
     set_fact_insight,
     get_fusion_recommendation,
     set_fusion_recommendation,
+    pipeline_interval_to_seconds,
+    get_pipeline_live_entry,
 )
 from .trend_pipeline import TrendPipeline
 from .fact_pipeline import FactPipeline
@@ -28,5 +30,7 @@ __all__ = [
     "set_fact_insight",
     "get_fusion_recommendation",
     "set_fusion_recommendation",
+    "pipeline_interval_to_seconds",
+    "get_pipeline_live_entry",
 ]
 

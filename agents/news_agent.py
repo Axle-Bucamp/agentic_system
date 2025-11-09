@@ -1,13 +1,10 @@
-""" 
-News Feed Agent - Monitors crypto news and analyzes sentiment using LLM.
-"""
+"""News Feed Agent - Monitors crypto news and analyzes sentiment using LLM."""
+import asyncio
 import hashlib
 import json
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
-
 import httpx
 from openai import AsyncOpenAI
 
@@ -23,6 +20,12 @@ from core.models import (
     SignalType,
 )
 from core.mocks.mock_llm_service import get_mock_llm_service
+from core.research import (
+    fetch_arxiv_entries,
+    fetch_coin_bureau_updates,
+    fetch_google_scholar_entries,
+    fetch_yahoo_finance_headlines,
+)
 
 
 class NewsAgent(BaseAgent):
@@ -34,6 +37,9 @@ class NewsAgent(BaseAgent):
         self.http_client: Optional[httpx.AsyncClient] = None
         self.mock_llm_service = None
         self.use_mock = settings.use_mock_services
+        self._use_gemini = False
+        self.source_weights: Dict[str, float] = settings.news_source_weights.copy()
+        self._mock_fallback_warned = False
         
     async def initialize(self):
         """Initialize LLM client and HTTP client."""
@@ -50,6 +56,8 @@ class NewsAgent(BaseAgent):
                 )
             elif settings.openai_api_key:
                 self.llm_client = AsyncOpenAI(api_key=settings.openai_api_key)
+            elif settings.gemini_api_key:
+                self._use_gemini = True
             else:
                 log.warning("No LLM endpoint configured, News Agent will have limited functionality")
             
@@ -58,16 +66,78 @@ class NewsAgent(BaseAgent):
         if self.http_client is None:
             self.http_client = httpx.AsyncClient(timeout=30.0)
     
+    async def _ensure_mock_service(self) -> bool:
+        """Initialise the mock LLM service if available."""
+        if self.mock_llm_service:
+            return True
+
+        try:
+            self.mock_llm_service = await get_mock_llm_service()
+            if not self._mock_fallback_warned:
+                log.bind(agent="NEWS").warning("Falling back to mock LLM service for news sentiment analysis")
+                self._mock_fallback_warned = True
+            return True
+        except Exception as exc:
+            log.bind(agent="NEWS").error("Unable to initialise mock LLM service: %s", exc)
+            return False
+
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         """Process incoming messages."""
         # News agent primarily operates on its own cycle
         return None
+    
+    async def _gemini_generate(self, prompt: str, max_tokens: int = 256) -> Optional[str]:
+        """Generate text using Gemini when configured."""
+        if not settings.gemini_api_key:
+            return None
+
+        if not self.http_client:
+            self.http_client = httpx.AsyncClient(timeout=30.0)
+
+        model_name = settings.camel_primary_model or "gemini-1.5-pro"
+        if not model_name.lower().startswith("gemini"):
+            model_name = "gemini-1.5-pro"
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": max(1, min(max_tokens, 1024)),
+            },
+        }
+
+        try:
+            response = await self.http_client.post(
+                url,
+                params={"key": settings.gemini_api_key},
+                json=payload,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            log.bind(agent="NEWS").error("Gemini request failed: %s", exc)
+            return None
+
+        data = response.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return None
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
+        return text.strip() if text else None
     
     async def run_cycle(self):
         """Run periodic news monitoring and sentiment analysis."""
         log.bind(agent="NEWS").debug("News Agent running cycle...")
         
         try:
+            await self._refresh_source_weights()
             # Fetch recent crypto news
             news_items = await self._fetch_crypto_news()
             
@@ -98,10 +168,9 @@ class NewsAgent(BaseAgent):
         await super().stop()
     
     async def _fetch_crypto_news(self) -> List[Dict]:
-        """Fetch recent crypto news from multiple sources."""
+        """Fetch recent crypto news from weighted sources."""
         news_items: List[Dict] = []
 
-        # Serve from cache if fresh
         cached_news = await self.redis.get_json("news:latest")
         if cached_news:
             timestamp = cached_news.get("timestamp")
@@ -113,85 +182,227 @@ class NewsAgent(BaseAgent):
                 except Exception:
                     pass
 
-        primary = await self._fetch_primary_headlines()
-        if primary:
-            news_items.extend(primary)
+        source_map = await self._gather_weighted_sources()
+        breakdown: Dict[str, int] = {}
+        for source_key, items in source_map.items():
+            enriched = self._enrich_source_items(items, source_key)
+            if not enriched:
+                continue
+            news_items.extend(enriched)
+            breakdown[source_key] = len(enriched)
 
-        deep = await self._fetch_deep_search_news()
-        if deep:
-            news_items.extend(deep)
-
-        arxiv_items = await self._fetch_arxiv_insights()
-        if arxiv_items:
-            news_items.extend(arxiv_items)
+        if news_items:
+            # Prioritize the highest weighted sources first
+            news_items.sort(
+                key=lambda item: (
+                    item.get("source_weight", 0.1),
+                    item.get("published_at") or "",
+                ),
+                reverse=True,
+            )
 
         await self.redis.set_json(
             "news:latest",
             {"items": news_items, "timestamp": datetime.utcnow().isoformat()},
             expire=600,
         )
+
+        breakdown_text = ", ".join(f"{name}={count}" for name, count in breakdown.items())
         log.bind(agent="NEWS").info(
-            "Fetched %d news items (primary=%d deep=%d arxiv=%d)",
+            "Fetched %d weighted news items (%s)",
             len(news_items),
-            len(primary),
-            len(deep),
-            len(arxiv_items),
+            breakdown_text or "no sources",
         )
         return news_items
+
+    async def _refresh_source_weights(self) -> None:
+        try:
+            dashboard = await self.redis.get_json("dashboard:settings") or {}
+            weights = dashboard.get("news_source_weights")
+            if isinstance(weights, dict):
+                parsed = {key: float(value) for key, value in weights.items()}
+                if parsed:
+                    self.source_weights = parsed
+        except Exception as exc:
+            log.bind(agent="NEWS").debug("Failed to refresh source weights: %s", exc)
+
+    async def _gather_weighted_sources(self) -> Dict[str, List[Dict[str, Any]]]:
+        if not self.http_client:
+            return {}
+
+        client = self.http_client
+        tasks: List[tuple[str, Any]] = [
+            ("yahoo_finance", fetch_yahoo_finance_headlines(client)),
+            ("coin_bureau", fetch_coin_bureau_updates(client)),
+        ]
+        if settings.arxiv_enabled:
+            tasks.append(
+                (
+                    "arxiv",
+                    fetch_arxiv_entries(
+                        client,
+                        'all:"cryptocurrency" OR all:"blockchain" OR all:"digital assets"',
+                        limit=6,
+                    ),
+                )
+            )
+        tasks.append(
+            (
+                "google_scholar",
+                fetch_google_scholar_entries(
+                    client,
+                    "cryptocurrency OR blockchain adoption OR decentralized finance",
+                    limit=6,
+                ),
+            )
+        )
+
+        results = await asyncio.gather(
+            *(coro for _, coro in tasks), return_exceptions=True
+        )
+
+        sources: Dict[str, List[Dict[str, Any]]] = {}
+        for (source_key, _), result in zip(tasks, results):
+            if isinstance(result, Exception):
+                log.bind(agent="NEWS").debug(
+                    "Source fetch failed: %s error=%s", source_key, result
+                )
+                continue
+            items = list(result)
+            if not items:
+                log.bind(agent="NEWS").debug(
+                    "Source %s returned no items; skipping for this cycle", source_key
+                )
+                continue
+            sources[source_key] = items
+
+        # Retain CryptoPanic as a lightweight general feed
+        primary = await self._fetch_primary_headlines()
+        if primary:
+            sources["cryptopanic"] = primary
+
+        return sources
+
+    def _enrich_source_items(
+        self, items: List[Dict[str, Any]], source_key: str
+    ) -> List[Dict[str, Any]]:
+        if not items:
+            return []
+
+        weight = self._resolve_source_weight(source_key)
+        if weight <= 0:
+            log.bind(agent="NEWS").debug(
+                "Source %s disabled via weight %.2f; skipping items", source_key, weight
+            )
+            return []
+
+        label = self._resolve_source_label(source_key)
+
+        enriched: List[Dict[str, Any]] = []
+        for item in items:
+            entry = dict(item)
+            entry.setdefault("source_key", source_key)
+            entry.setdefault("source", label)
+            entry["source_weight"] = weight
+            if not entry.get("currencies"):
+                entry["currencies"] = self._infer_currencies(entry.get("title", ""))
+            enriched.append(entry)
+        return enriched
+
+    def _resolve_source_weight(self, source_key: Optional[str]) -> float:
+        if not source_key:
+            return 0.1
+        if source_key in self.source_weights:
+            return max(self.source_weights[source_key], 0.05)
+        # Default fallback weights for legacy feeds
+        fallback_weights = {
+            "cryptopanic": 0.15,
+        }
+        return fallback_weights.get(source_key, 0.1)
+
+    def _resolve_source_label(self, source_key: Optional[str]) -> str:
+        mapping = {
+            "yahoo_finance": "Yahoo Finance",
+            "coin_bureau": "Coin Bureau",
+            "arxiv": "arXiv",
+            "google_scholar": "Google Scholar",
+            "cryptopanic": "CryptoPanic",
+        }
+        if not source_key:
+            return "Unknown"
+        return mapping.get(source_key, source_key.replace("_", " ").title())
+
+    def _average_source_weight(self, items: List[Dict[str, Any]], limit: int = 5) -> float:
+        if not items:
+            return 0.1
+        weights: List[float] = []
+        for item in items[:limit]:
+            if "source_weight" in item:
+                weights.append(float(item["source_weight"]))
+            else:
+                weights.append(self._resolve_source_weight(item.get("source_key")))
+        return sum(weights) / len(weights) if weights else 0.1
+    
+    async def _analyze_news_sentiment_mock(self, news_item: Dict) -> None:
+        """Fallback sentiment analysis using the mock LLM service."""
+        if not await self._ensure_mock_service():
+            return
+
+        title = news_item.get("title", "")
+        currencies = news_item.get("currencies", [])
+
+        sentiment_result = await self.mock_llm_service.analyze_sentiment(title)
+        source_weight = self._resolve_source_weight(news_item.get("source_key"))
+        base_confidence = float(sentiment_result.get("confidence", 0.5))
+        confidence = min(1.0, max(base_confidence, 0.2) * (0.6 + source_weight))
+
+        sentiment_score = sentiment_result.get("positive_score", 0.0) - sentiment_result.get("negative_score", 0.0)
+        explanation = f"Mock analysis [{source_weight:.2f} weight]: {sentiment_result.get('sentiment', 'neutral')} sentiment"
+
+        log.bind(agent="NEWS").info(
+            "Mock sentiment for '%s' score=%.2f confidence=%.2f",
+            title[:80],
+            sentiment_score,
+            confidence,
+        )
+
+        targets = currencies or self._infer_currencies(title)
+        for ticker in targets:
+            sentiment = NewsSentiment(
+                ticker=ticker,
+                sentiment_score=sentiment_score,
+                confidence=confidence,
+                summary=explanation,
+                sources=[news_item.get("source", "Mock News")],
+                timestamp=datetime.utcnow(),
+            )
+
+            await self.redis.set_json(
+                f"news:sentiment:{ticker}",
+                {**sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
+                expire=3600,
+            )
+
+            if abs(sentiment_score) > 0.5 and confidence > 0.7:
+                await self._send_sentiment_signal(sentiment)
+
+            await self._broadcast_news_event(
+                ticker,
+                sentiment_score,
+                confidence,
+                sentiment.summary,
+                sentiment.sources,
+                source_weight,
+            )
     
     async def _analyze_news_sentiment(self, news_item: Dict):
         """Analyze sentiment of a news item using LLM."""
-        if self.use_mock and self.mock_llm_service:
-            # Use mock LLM service
-            title = news_item.get("title", "")
-            currencies = news_item.get("currencies", [])
-            
-            # Analyze sentiment using mock service
-            sentiment_result = await self.mock_llm_service.analyze_sentiment(title)
-            
-            # Convert to our format
-            sentiment_score = sentiment_result["positive_score"] - sentiment_result["negative_score"]
-            confidence = sentiment_result["confidence"]
-            explanation = f"Mock analysis: {sentiment_result['sentiment']} sentiment"
-            log.bind(agent="NEWS").info(
-                "Mock sentiment for '%s' score=%.2f confidence=%.2f",
-                title[:80],
-                sentiment_score,
-                confidence,
-            )
-            
-            # Process each currency
-            for ticker in currencies:
-                sentiment = NewsSentiment(
-                    ticker=ticker,
-                    sentiment_score=sentiment_score,
-                    confidence=confidence,
-                    summary=explanation,
-                    sources=[news_item.get("source", "Mock News")]
-                )
-                
-                # Cache sentiment
-                await self.redis.set_json(
-                    f"news:sentiment:{ticker}",
-                    {**sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
-                    ttl=3600  # 1 hour
-                )
-                
-                # Send signal if sentiment is strong
-                if abs(sentiment_score) > 0.5 and confidence > 0.7:
-                    await self._send_sentiment_signal(sentiment)
-
-                await self._broadcast_news_event(
-                    ticker,
-                    sentiment_score,
-                    confidence,
-                    sentiment.summary,
-                    sentiment.sources,
-                )
-            
+        if self.use_mock:
+            await self._analyze_news_sentiment_mock(news_item)
             return
-        
-        if not self.llm_client:
+
+        if not self.llm_client and not self._use_gemini:
+            await self._analyze_news_sentiment_mock(news_item)
             return
         
         try:
@@ -212,24 +423,29 @@ Provide:
 Respond in JSON format:
 {{"sentiment_score": <float>, "confidence": <float>, "explanation": "<string>"}}"""
             
-            # Call LLM
-            response = await self.llm_client.chat.completions.create(
-                model="gpt-4.1-mini",  # Will use VLLM model if configured
-                messages=[
-                    {"role": "system", "content": "You are a crypto market sentiment analyst. Respond only with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=200
-            )
-            
-            content = response.choices[0].message.content
+            if self._use_gemini:
+                content = await self._gemini_generate(prompt, max_tokens=200)
+                if not content:
+                    return
+            else:
+                response = await self.llm_client.chat.completions.create(
+                    model="gpt-4.1-mini",  # Will use VLLM model if configured
+                    messages=[
+                        {"role": "system", "content": "You are a crypto market sentiment analyst. Respond only with valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=200
+                )
+                content = response.choices[0].message.content
             sentiment_data = self._extract_json_response(content)
             if not sentiment_data:
                 return
 
             sentiment_score = float(sentiment_data.get("sentiment_score", 0.0))
-            confidence = float(sentiment_data.get("confidence", 0.5))
+            base_confidence = float(sentiment_data.get("confidence", 0.5))
+            source_weight = self._resolve_source_weight(news_item.get("source_key"))
+            confidence = min(1.0, max(base_confidence, 0.2) * (0.6 + source_weight))
             explanation = sentiment_data.get("explanation", "")
 
             affected_tickers = currencies or self._infer_currencies(title)
@@ -246,7 +462,7 @@ Respond in JSON format:
                     ticker=ticker,
                     sentiment_score=sentiment_score,
                     confidence=confidence,
-                    summary=f"{title} - {explanation}",
+                    summary=f"{title} [{source_weight:.2f} weight] - {explanation}",
                     sources=[news_item.get("source", "Unknown")],
                     timestamp=datetime.utcnow()
                 )
@@ -266,10 +482,13 @@ Respond in JSON format:
                     confidence,
                     sentiment.summary,
                     sentiment.sources,
+                    source_weight,
                 )
             
         except Exception as e:
             log.error(f"Error analyzing news sentiment: {e}")
+            if not self.use_mock:
+                await self._analyze_news_sentiment_mock(news_item)
 
     async def _fetch_primary_headlines(self) -> List[Dict[str, Any]]:
         if not self.http_client:
@@ -302,138 +521,19 @@ Respond in JSON format:
             )
         return headlines
 
-    async def _fetch_deep_search_news(self) -> List[Dict[str, Any]]:
-        if not settings.deep_search_api_url or not self.http_client:
-            return []
-        params = {
-            "q": "crypto market OR blockchain adoption",
-            "page_size": 8,
-        }
-        headers = {}
-        if settings.deep_search_api_key:
-            headers["Authorization"] = settings.deep_search_api_key
-
-        try:
-            response = await self.http_client.get(
-                settings.deep_search_api_url, params=params, headers=headers
-            )
-            response.raise_for_status()
-        except Exception as exc:
-            log.bind(agent="NEWS").debug("Deep search provider failed: %s", exc)
-            return []
-
-        data = response.json()
-        articles = data.get("articles") or data.get("data") or []
-        allowed_sources = {source.lower() for source in settings.deep_search_sources}
-        items: List[Dict[str, Any]] = []
-        for article in articles:
-            source = ""
-            article_source = article.get("source")
-            if isinstance(article_source, dict):
-                source = article_source.get("name", "")
-            elif isinstance(article_source, str):
-                source = article_source
-            if allowed_sources and source and source.lower() not in allowed_sources:
-                continue
-            title = article.get("title") or article.get("headline") or ""
-            items.append(
-                {
-                    "title": title,
-                    "url": article.get("url") or article.get("link", ""),
-                    "source": source or "DeepSearch",
-                    "published_at": article.get("published_at") or article.get("date"),
-                    "currencies": self._infer_currencies(title),
-                }
-            )
-        return items
-
-    async def _fetch_arxiv_insights(self) -> List[Dict[str, Any]]:
-        if not settings.arxiv_enabled or not self.http_client:
-            return []
-        query = urlencode(
-            {
-                "search_query": 'all:"cryptocurrency" OR all:"blockchain"',
-                "sortBy": "submittedDate",
-                "max_results": 5,
-            }
-        )
-        try:
-            response = await self.http_client.get(f"https://export.arxiv.org/api/query?{query}")
-            response.raise_for_status()
-        except Exception as exc:
-            log.bind(agent="NEWS").debug("ArXiv request failed: %s", exc)
-            return []
-
-        items: List[Dict[str, Any]] = []
-        try:
-            import xml.etree.ElementTree as ET
-
-            root = ET.fromstring(response.text)
-            ns = {"atom": "http://www.w3.org/2005/Atom"}
-            for entry in root.findall("atom:entry", ns):
-                title = entry.findtext("atom:title", default="", namespaces=ns).strip()
-                link_el = entry.find("atom:link", ns)
-                link = link_el.attrib.get("href") if link_el is not None else ""
-                published = entry.findtext("atom:published", default="", namespaces=ns)
-                items.append(
-                    {
-                        "title": title,
-                        "url": link,
-                        "source": "arXiv",
-                        "published_at": published,
-                        "currencies": self._infer_currencies(title),
-                    }
-                )
-        except Exception as exc:
-            log.bind(agent="NEWS").debug("Failed to parse arXiv feed: %s", exc)
-        return items
-    
     async def _generate_market_sentiment(self, news_items: List[Dict]):
         """Generate overall market sentiment from multiple news items."""
-        if self.use_mock and self.mock_llm_service:
-            # Use mock LLM service for market sentiment
-            headlines = [item.get("title", "") for item in news_items[:10]]
-            combined_text = " ".join(headlines)
-            
-            # Analyze overall sentiment
-            sentiment_result = await self.mock_llm_service.analyze_sentiment(combined_text)
-            
-            # Generate summary
-            summary = await self.mock_llm_service.generate_summary(combined_text, max_length=100)
-            
-            # Create market sentiment
-            market_sentiment = NewsSentiment(
-                ticker=None,  # General market sentiment
-                sentiment_score=sentiment_result["positive_score"] - sentiment_result["negative_score"],
-                confidence=sentiment_result["confidence"],
-                summary=summary,
-                sources=["Mock News Analysis"]
-            )
-            
-            # Cache market sentiment
-            await self.redis.set_json(
-                "news:market_sentiment",
-                {**market_sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
-                ttl=1800  # 30 minutes
-            )
-            
-            log.bind(agent="NEWS").info(
-                "Market sentiment (mock) score=%.2f confidence=%.2f",
-                market_sentiment.sentiment_score,
-                market_sentiment.confidence,
-            )
-            await self._broadcast_news_event(
-                None,
-                market_sentiment.sentiment_score,
-                market_sentiment.confidence,
-                market_sentiment.summary,
-                market_sentiment.sources,
-            )
+        if self.use_mock:
+            await self._generate_market_sentiment_mock(news_items)
             return
-        
-        if not self.llm_client or not news_items:
+
+        if not news_items:
             return
-        
+
+        if not self.llm_client and not self._use_gemini:
+            await self._generate_market_sentiment_mock(news_items)
+            return
+
         try:
             # Aggregate headlines
             headlines = [item.get("title", "") for item in news_items[:10]]
@@ -451,26 +551,35 @@ Provide:
 Respond in JSON format:
 {{"sentiment_score": <float>, "confidence": <float>, "summary": "<string>"}}"""
             
-            response = await self.llm_client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[
-                    {"role": "system", "content": "You are a crypto market analyst. Respond only with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=300
-            )
-            
-            content = response.choices[0].message.content
+            if self._use_gemini:
+                content = await self._gemini_generate(prompt, max_tokens=300)
+                if not content:
+                    return
+            else:
+                response = await self.llm_client.chat.completions.create(
+                    model="gpt-4.1-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a crypto market analyst. Respond only with valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=300
+                )
+                content = response.choices[0].message.content
             sentiment_data = self._extract_json_response(content)
             if not sentiment_data:
                 return
 
+            avg_weight = self._average_source_weight(news_items, limit=8)
             market_sentiment = NewsSentiment(
                 ticker=None,
                 sentiment_score=float(sentiment_data.get("sentiment_score", 0.0)),
-                confidence=float(sentiment_data.get("confidence", 0.5)),
-                summary=sentiment_data.get("summary", ""),
+                confidence=min(
+                    1.0,
+                    max(float(sentiment_data.get("confidence", 0.5)), 0.2)
+                    * (0.6 + avg_weight),
+                ),
+                summary=f"[avg weight {avg_weight:.2f}] {sentiment_data.get('summary', '')}",
                 sources=[item.get("source", "Unknown") for item in news_items[:5]],
                 timestamp=datetime.utcnow()
             )
@@ -492,10 +601,57 @@ Respond in JSON format:
                 market_sentiment.confidence,
                 market_sentiment.summary,
                 market_sentiment.sources,
+                avg_weight,
             )
-            
         except Exception as e:
             log.error(f"Error generating market sentiment: {e}")
+            await self._generate_market_sentiment_mock(news_items)
+
+    async def _generate_market_sentiment_mock(self, news_items: List[Dict]) -> None:
+        """Generate market sentiment using the mock LLM service."""
+        if not await self._ensure_mock_service():
+            return
+
+        headlines = [item.get("title", "") for item in news_items[:10]]
+        combined_text = " ".join(headlines)
+
+        sentiment_result = await self.mock_llm_service.analyze_sentiment(combined_text)
+        summary = await self.mock_llm_service.generate_summary(combined_text, max_length=100)
+        avg_weight = self._average_source_weight(news_items, limit=8)
+        confidence = min(
+            1.0,
+            max(sentiment_result.get("confidence", 0.5), 0.2) * (0.6 + avg_weight),
+        )
+
+        market_sentiment = NewsSentiment(
+            ticker=None,
+            sentiment_score=sentiment_result.get("positive_score", 0.0)
+            - sentiment_result.get("negative_score", 0.0),
+            confidence=confidence,
+            summary=f"[avg weight {avg_weight:.2f}] {summary}",
+            sources=["Mock News Analysis"],
+            timestamp=datetime.utcnow(),
+        )
+
+        await self.redis.set_json(
+            "news:market_sentiment",
+            {**market_sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
+            expire=1800,
+        )
+
+        log.bind(agent="NEWS").info(
+            "Market sentiment (mock) score=%.2f confidence=%.2f",
+            market_sentiment.sentiment_score,
+            market_sentiment.confidence,
+        )
+        await self._broadcast_news_event(
+            None,
+            market_sentiment.sentiment_score,
+            market_sentiment.confidence,
+            market_sentiment.summary,
+            market_sentiment.sources,
+            avg_weight,
+        )
     
     async def _send_sentiment_signal(self, sentiment: NewsSentiment):
         """Send sentiment signal to orchestrator."""
@@ -541,6 +697,7 @@ Respond in JSON format:
         confidence: float,
         summary: str,
         sources: List[str],
+        source_weight: Optional[float] = None,
     ):
         try:
             news_id_seed = f"{ticker}:{summary}"
@@ -552,6 +709,11 @@ Respond in JSON format:
                 "confidence": confidence,
                 "summary": summary,
                 "sources": sources,
+                "source_weight": source_weight
+                if source_weight is not None
+                else self._resolve_source_weight(
+                    sources[0].lower().replace(" ", "_") if sources else None
+                ),
                 "timestamp": datetime.utcnow().isoformat(),
             }
             message = AgentMessage(

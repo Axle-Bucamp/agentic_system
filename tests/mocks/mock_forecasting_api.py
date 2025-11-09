@@ -175,6 +175,7 @@ class MockForecastingClient(ForecastingClient):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.mock_api = MockForecastingAPI()
+        self.is_connected = False
     
     async def connect(self) -> None:
         """Connect to mock API."""
@@ -188,7 +189,14 @@ class MockForecastingClient(ForecastingClient):
     
     async def get_available_tickers(self) -> List[Dict[str, Any]]:
         """Get available tickers from mock API."""
-        return await self.mock_api.get_available_tickers()
+        cache_key = "available_tickers"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        tickers = await self.mock_api.get_available_tickers()
+        self._set_cache(cache_key, tickers)
+        return tickers
     
     async def get_ticker_info(self, ticker: str) -> Dict[str, Any]:
         """Get ticker info from mock API."""
@@ -196,23 +204,58 @@ class MockForecastingClient(ForecastingClient):
     
     async def get_action_recommendation(self, ticker: str, interval: str) -> Dict[str, Any]:
         """Get action recommendation from mock API."""
-        return await self.mock_api.get_action_recommendation(ticker, interval)
+        cache_key = f"action_{ticker}_{interval}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        data = await self.mock_api.get_action_recommendation(ticker, interval)
+        self._set_cache(cache_key, data)
+        return data
     
     async def get_stock_forecast(self, ticker: str, interval: str) -> Dict[str, Any]:
         """Get stock forecast from mock API."""
-        return await self.mock_api.get_stock_forecast(ticker, interval)
+        cache_key = f"forecast_{ticker}_{interval}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        forecast = await self.mock_api.get_stock_forecast(ticker, interval)
+        self._set_cache(cache_key, forecast)
+        return forecast
     
     async def get_model_metrics(self, ticker: str, interval: str) -> Dict[str, Any]:
         """Get model metrics from mock API."""
-        return await self.mock_api.get_model_metrics(ticker, interval)
+        cache_key = f"metrics_{ticker}_{interval}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        metrics = await self.mock_api.get_model_metrics(ticker, interval)
+        self._set_cache(cache_key, metrics)
+        return metrics
     
     async def get_available_intervals(self) -> List[str]:
         """Get available intervals from mock API."""
-        return await self.mock_api.get_available_intervals()
+        cache_key = "available_intervals"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        intervals = await self.mock_api.get_available_intervals()
+        self._set_cache(cache_key, intervals)
+        return intervals
     
     async def get_market_sentiment(self) -> Dict[str, Any]:
         """Get market sentiment from mock API."""
-        return await self.mock_api.get_market_sentiment()
+        cache_key = "market_sentiment"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        sentiment = await self.mock_api.get_market_sentiment()
+        self._set_cache(cache_key, sentiment, timedelta(minutes=15))
+        return sentiment
     
     async def get_health_status(self) -> Dict[str, Any]:
         """Get health status from mock API."""
@@ -233,3 +276,4 @@ class MockForecastingClient(ForecastingClient):
     def clear_data(self) -> None:
         """Clear all mock data for testing."""
         self.mock_api.clear_data()
+        self.clear_cache()

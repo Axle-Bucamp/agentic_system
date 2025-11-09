@@ -77,13 +77,19 @@ class MemoryPruningPipeline:
                 summarised.append(group[0])
                 continue
             latest = group[-1]
-            aggregated_sentiment = sum(item.sentiment_score * item.weight for item in group) / sum(
-                item.weight for item in group
-            )
+            total_weight = sum(item.weight for item in group)
+            aggregated_sentiment = sum(item.sentiment_score * item.weight for item in group) / total_weight
             latest.sentiment_score = aggregated_sentiment
             latest.confidence = max(item.confidence for item in group)
-            latest.weight = sum(item.weight for item in group)
+            latest.weight = total_weight
             latest.summary = latest.summary[:240]
+            if not isinstance(latest.metadata, dict):
+                latest.metadata = {}
+            source_weights = [
+                (item.metadata or {}).get("source_weight", 0.1) for item in group
+            ]
+            avg_source_weight = sum(source_weights) / len(source_weights)
+            latest.metadata["source_weight"] = avg_source_weight
             summarised.append(latest)
 
         summarised.sort(key=lambda entry: entry.timestamp, reverse=True)

@@ -1,8 +1,6 @@
 # Use uv base image with Python pre-installed
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm
 
-ARG AGENT_NAME
-
 # Set working directory
 WORKDIR /app
 
@@ -10,7 +8,7 @@ WORKDIR /app
 ENV UV_HTTP_TIMEOUT=300 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    AGENT_NAME=${AGENT_NAME}
+    AGENT_NAME=generic-agent
 
 # Install system dependencies (minimal, build tools are preinstalled in uv image)
 RUN apt-get update && apt-get install -y \

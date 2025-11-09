@@ -37,10 +37,23 @@ DEFAULT_AGENT_PROMPTS: Dict[str, str] = {
 
 DEFAULT_MCP_SETTINGS: Dict[str, Dict[str, object]] = {
     "news": {
-        "deep_search_enabled": True,
+        "deep_search_enabled": False,
         "sentiment_enabled": True,
         "sources": settings.deep_search_sources,
         "refresh_minutes": 60,
+        "source_weights": settings.news_source_weights,
+        "toolkits": {
+            "yahoo_finance": {
+                "type": "mcp",
+                "command": "uvx",
+                "args": ["mcp-yahoo-finance"],
+            },
+            "youtube_transcript": {
+                "type": "mcp",
+                "command": "npx",
+                "args": ["-y", "@sinco-lab/mcp-youtube-transcript"],
+            },
+        },
     }
 }
 
@@ -186,7 +199,18 @@ class WeightReviewPipeline:
         news_settings["sentiment_enabled"] = True
         news_settings["sources"] = news_settings.get("sources") or settings.deep_search_sources
         news_settings["refresh_minutes"] = self._derive_refresh_window(news_score)
+        news_settings.setdefault("toolkits", DEFAULT_MCP_SETTINGS["news"]["toolkits"])
+        source_weights = dict(dashboard.get("news_source_weights") or settings.news_source_weights)
+        news_settings["source_weights"] = self._rebalance_source_weights(source_weights, news_score)
         mcp_overrides["news"] = news_settings
+
+        dashboard["news_source_weights"] = news_settings["source_weights"]
+
+        if AgentType.NEWS.value in agent_prompts:
+            agent_prompts[AgentType.NEWS.value] = self._inject_weight_summary(
+                agent_prompts[AgentType.NEWS.value],
+                news_settings["source_weights"],
+            )
 
         dashboard.update(
             {
@@ -216,6 +240,27 @@ class WeightReviewPipeline:
         if score > 6:
             return 120
         return 60
+
+    @staticmethod
+    def _rebalance_source_weights(weights: Dict[str, float], score: float) -> Dict[str, float]:
+        adjusted = weights.copy()
+        # Simple heuristic: if news performance lags, tilt toward higher-trust sources (Yahoo/Coin Bureau)
+        bias = 0.05 if score < 1 else (-0.05 if score > 8 else 0.0)
+        if bias != 0.0:
+            for key in adjusted:
+                if key in {"yahoo_finance", "coin_bureau"}:
+                    adjusted[key] = max(0.05, adjusted[key] + bias)
+                else:
+                    adjusted[key] = max(0.05, adjusted[key] - bias / max(len(adjusted) - 2, 1))
+        total = sum(adjusted.values())
+        if total <= 0:
+            return weights
+        return {key: round(value / total, 4) for key, value in adjusted.items()}
+
+    @staticmethod
+    def _inject_weight_summary(prompt: str, weights: Dict[str, float]) -> str:
+        ordered = ", ".join(f"{k}:{v:.2f}" for k, v in sorted(weights.items()))
+        return f"{prompt} Current source weights -> {ordered}."
 
 
 async def get_cached_weights(redis_client) -> Optional[Dict[str, float]]:
