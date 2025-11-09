@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from statistics import fmean
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 from core.config import settings
 from core.logging import log
@@ -38,7 +38,6 @@ DEFAULT_AGENT_PROMPTS: Dict[str, str] = {
 DEFAULT_MCP_SETTINGS: Dict[str, Dict[str, object]] = {
     "news": {
         "deep_search_enabled": False,
-        "sentiment_enabled": True,
         "sources": settings.deep_search_sources,
         "refresh_minutes": 60,
         "source_weights": settings.news_source_weights,
@@ -196,7 +195,6 @@ class WeightReviewPipeline:
         news_settings = mcp_overrides.get("news", {}).copy()
         news_score = metrics.get(AgentType.NEWS.value, 0.0)
         news_settings["deep_search_enabled"] = news_score < 2 or news_settings.get("deep_search_enabled", True)
-        news_settings["sentiment_enabled"] = True
         news_settings["sources"] = news_settings.get("sources") or settings.deep_search_sources
         news_settings["refresh_minutes"] = self._derive_refresh_window(news_score)
         news_settings.setdefault("toolkits", DEFAULT_MCP_SETTINGS["news"]["toolkits"])
@@ -225,13 +223,19 @@ class WeightReviewPipeline:
 
     @staticmethod
     def _compose_agent_prompt(base_prompt: str, score: float) -> str:
+        guidance: List[str] = [base_prompt.strip()]
         if score < 1:
-            modifier = "Performance trending soft; tighten reasoning, demand extra validation, and call out data gaps."
+            guidance.append(
+                "Performance trending soft; tighten reasoning, demand explicit data citations, and call out missing context."
+            )
         elif score > 8:
-            modifier = "Performance strong; maintain current strategy but flag complacency risks."
+            guidance.append(
+                "Performance strong; maintain current strategy but surface residual risks and challenge optimistic bias."
+            )
         else:
-            modifier = "Keep balanced perspective; reinforce collaboration with fusion agent."
-        return f"{base_prompt} {modifier}"
+            guidance.append("Keep balanced perspective; reinforce collaboration with fusion and risk agents.")
+        guidance.append("Summaries must be bulletled, actionable, and reference the latest OpenRouter insights.")
+        return " ".join(guidance)
 
     @staticmethod
     def _derive_refresh_window(score: float) -> int:

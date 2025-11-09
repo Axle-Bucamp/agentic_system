@@ -5,11 +5,14 @@ Replaces the traditional OrchestratorAgent with CAMEL Workforce for advanced
 multi-agent task orchestration, decomposition, and coordination.
 """
 import asyncio
+import contextlib
+import time
 import uuid
 import json
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
 from core.config import settings
-from typing import Any, Dict, List, Optional
 from core.logging import log
 from core.models import AgentType, AgentMessage, MessageType
 from core.redis_client import RedisClient
@@ -53,6 +56,9 @@ class WorkforceOrchestratorAgent(BaseAgent):
         self.running = False
         self._last_wallet_plan_timestamp: Optional[str] = None
         self._workforce_available: bool = True
+        self._workforce_queue: "asyncio.Queue[Tuple[Task, asyncio.Future]]" = asyncio.Queue()
+        self._workforce_worker_task: Optional[asyncio.Task] = None
+        self._workforce_task_timeout: float = float(getattr(settings, "workforce_task_timeout_seconds", 120))
         
     async def initialize(self):
         """Initialize the Workforce orchestrator."""
@@ -152,6 +158,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
             await self._add_workers_to_workforce()
             
             log.info("Workforce Orchestrator initialized successfully")
+            self._ensure_workforce_worker_running()
             
         except Exception as e:
             self._workforce_available = False
@@ -342,22 +349,44 @@ class WorkforceOrchestratorAgent(BaseAgent):
                 await self.redis.set_json(f"ai_decision:{decision_id}", decision_metadata)
                 return
 
-            log.info(f"[AI_DECISION] Workforce processed task for {ticker}: {result}")
+            if isinstance(result, dict):
+                result_text = result.get("text") or ""
+                if not result_text and result.get("messages"):
+                    result_text = "\n".join(result.get("messages", []))
+                if not result_text:
+                    result_text = str(result.get("raw", "")) or "[no agent response]"
+                result_messages = result.get("messages", [])
+                success_flag = result.get("success", True)
+                if not success_flag:
+                    decision_metadata["status"] = "degraded"
+                    if result.get("error"):
+                        decision_metadata["error"] = result["error"]
+                else:
+                    decision_metadata["status"] = "completed"
+                if "raw" in result:
+                    decision_metadata["result_raw"] = str(result.get("raw"))
+            else:
+                result_text = str(result)
+                result_messages = []
+                decision_metadata["status"] = "completed"
+
+            log.info(f"[AI_DECISION] Workforce processed task for {ticker}: {result_text}")
             decision_metadata["steps"].append({
                 "step": "task_processed",
-                "result": str(result),
+                "result": result_text,
+                "messages": result_messages,
                 "timestamp": datetime.utcnow().isoformat()
             })
 
-            decision_metadata["status"] = "completed"
-            decision_metadata["result"] = str(result)
+            decision_metadata["result"] = result_text
+            decision_metadata["result_text"] = result_text
             decision_metadata["completed_at"] = datetime.utcnow().isoformat()
             await self.redis.set_json(f"ai_decision:{decision_id}", decision_metadata)
 
             if self.memory_manager:
                 result_message = BaseMessage.make_assistant_message(
                     role_name="Workforce",
-                    content=str(result)
+                    content=result_text
                 )
                 self.memory_manager.write_record(result_message)
                 log.info(f"[AI_DECISION] Decision {decision_id} stored in memory")
@@ -421,7 +450,7 @@ class WorkforceOrchestratorAgent(BaseAgent):
                         log.debug("Workforce disabled; skipping automated analysis for {}", ticker)
                         continue
 
-                    log.info(f"Workforce cycle result for {ticker}: {result}")
+                    log.bind(agent="WORKFORCE", ticker=ticker).info("Cycle result: %s", result)
                         
                 except Exception as e:
                     log.error(f"Error processing cycle for {ticker}: {e}")
@@ -514,6 +543,36 @@ class WorkforceOrchestratorAgent(BaseAgent):
         # Call parent stop method
         await super().stop()
 
+        if self._workforce_worker_task:
+            self._workforce_worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._workforce_worker_task
+            self._workforce_worker_task = None
+
+    def _ensure_workforce_worker_running(self) -> None:
+        if not self.workforce or not self._workforce_available:
+            return
+
+        if self._workforce_worker_task and not self._workforce_worker_task.done():
+            return
+
+        if self._workforce_worker_task and self._workforce_worker_task.done():
+            self._workforce_worker_task = None
+
+        try:
+            self._workforce_worker_task = asyncio.create_task(
+                self._run_workforce_queue(),
+                name="workforce-queue-worker",
+            )
+            log.debug("Started workforce queue worker task")
+        except RuntimeError as exc:
+            log.warning("Unable to start workforce queue worker: %s", exc)
+
+    @staticmethod
+    def _is_workforce_busy_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "workforce is running" in message or "already running" in message
+
     def _should_disable_workforce(self, exc: Exception) -> bool:
         message = str(exc).lower()
         markers = (
@@ -523,34 +582,170 @@ class WorkforceOrchestratorAgent(BaseAgent):
             "unauthorized",
             "quota",
         )
+        if self._is_workforce_busy_error(exc):
+            return False
         return any(marker in message for marker in markers)
 
-    async def _process_task_with_workforce(self, task: Task) -> Optional[Any]:
-        """Safely run a workforce task, disabling the workforce on persistent failures."""
+    async def _process_task_with_workforce(self, task: Task) -> Optional[Dict[str, Any]]:
+        """Queue the task for workforce processing with robust retries and fallbacks."""
         if not self.workforce or not self._workforce_available:
-            return None
+            return self._format_workforce_result(
+                {"success": False, "error": "workforce unavailable"}
+            )
 
-        log.debug("[WORKFORCE] Processing task payload: {}", task.content[:200])
+        self._ensure_workforce_worker_running()
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        await self._workforce_queue.put((task, future))
 
         try:
-            processor = getattr(self.workforce, "process_task", None)
-            if callable(processor):
-                if asyncio.iscoroutinefunction(processor):
-                    return await processor(task)
-                return processor(task)
+            result = await asyncio.wait_for(future, timeout=self._workforce_task_timeout)
+        except asyncio.TimeoutError:
+            future.cancel()
+            log.bind(agent="WORKFORCE").warning(
+                "Workforce task timed out after %.1fs; returning degraded result",
+                self._workforce_task_timeout,
+            )
+            return self._format_workforce_result(
+                {
+                    "success": False,
+                    "error": f"workforce timeout after {self._workforce_task_timeout:.0f}s",
+                }
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.bind(agent="WORKFORCE").exception("Unexpected error awaiting workforce result")
+            return self._format_workforce_result({"success": False, "error": str(exc)})
 
-            async_processor = getattr(self.workforce, "process_task_async", None)
-            if callable(async_processor):
-                return await async_processor(task)
+        return result if isinstance(result, dict) else self._format_workforce_result(result)
 
-            log.warning("Workforce instance has no process_task handler; disabling workforce")
-            self._workforce_available = False
-            return None
+    async def _run_workforce_queue(self) -> None:
+        log.debug("Workforce queue worker loop started")
+        while True:
+            task, future = await self._workforce_queue.get()
 
-        except Exception as exc:
-            log.error("Workforce processing error: {}", exc)
-            if self._should_disable_workforce(exc):
-                self._workforce_available = False
-                log.warning("Disabling workforce after repeated model failures. Falling back to rule-based orchestration.")
-            return None
+            if future.cancelled():
+                self._workforce_queue.task_done()
+                continue
+
+            try:
+                result = await self._execute_workforce_task(task)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                log.bind(agent="WORKFORCE").exception("Unhandled error in queue worker: {}", exc)
+                result = self._format_workforce_result({"success": False, "error": str(exc)})
+
+            if not future.cancelled():
+                future.set_result(result)
+
+            self._workforce_queue.task_done()
+
+    async def _execute_workforce_task(self, task: Task) -> Dict[str, Any]:
+        if not self.workforce or not self._workforce_available:
+            return self._format_workforce_result(
+                {"success": False, "error": "workforce unavailable"}
+            )
+
+        log.bind(agent="WORKFORCE").debug("Processing task payload: %s", task.content[:200])
+
+        busy_deadline = time.monotonic() + max(self._workforce_task_timeout, 10.0)
+        delay = 0.5
+        last_exception: Optional[Exception] = None
+
+        attempt = 0
+        while time.monotonic() <= busy_deadline:
+            attempt += 1
+            try:
+                raw_result = await self._invoke_workforce(task)
+                return self._format_workforce_result(raw_result)
+            except Exception as exc:
+                last_exception = exc
+                log.bind(agent="WORKFORCE", attempt=attempt).warning(
+                    "Workforce task execution failed: {}", exc
+                )
+
+                if self._is_workforce_busy_error(exc):
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 1.5, 5.0)
+                    continue
+
+                if self._should_disable_workforce(exc):
+                    self._workforce_available = False
+                    log.bind(agent="WORKFORCE").warning(
+                        "Disabling workforce after repeated model failures. Falling back to rule-based orchestration."
+                    )
+                break
+        else:
+            log.bind(agent="WORKFORCE").warning(
+                "Workforce busy window exceeded %.1fs; degrading result", self._workforce_task_timeout
+            )
+
+        error_payload = {
+            "success": False,
+            "error": str(last_exception) if last_exception else "Unknown workforce error",
+        }
+        return self._format_workforce_result(error_payload)
+
+    async def _invoke_workforce(self, task: Task) -> Any:
+        if not self.workforce:
+            raise RuntimeError("workforce not initialised")
+
+        async_processor = getattr(self.workforce, "process_task_async", None)
+        if callable(async_processor):
+            return await async_processor(task)
+
+        processor = getattr(self.workforce, "process_task", None)
+        if callable(processor):
+            if asyncio.iscoroutinefunction(processor):
+                return await processor(task)
+            return await asyncio.to_thread(processor, task)
+
+        raise RuntimeError("workforce handler unavailable")
+
+    @staticmethod
+    def _format_workforce_result(raw: Any) -> Dict[str, Any]:
+        """Normalise CAMEL workforce responses into a consistent dictionary with textual output."""
+        success = True
+        messages: List[str] = []
+        text: str = ""
+        error_text: Optional[str] = None
+
+        if isinstance(raw, dict):
+            success = raw.get("success", True)
+            messages = [str(msg) for msg in raw.get("messages", []) if msg is not None]
+            text = raw.get("text") or raw.get("response") or raw.get("result") or raw.get("content", "")
+            if not text and messages:
+                text = "\n".join(messages)
+            error_text = raw.get("error")
+        elif isinstance(raw, list):
+            messages = [str(item) for item in raw]
+            text = "\n".join(messages)
+        elif raw is None:
+            success = False
+            text = ""
+        else:
+            text = str(raw)
+
+        if not text:
+            if error_text:
+                text = str(error_text)
+            elif messages:
+                text = "\n".join(messages)
+            else:
+                text = "[no agent response]"
+
+        if not success:
+            context_message = error_text or text
+            log.bind(agent="WORKFORCE").warning("Workforce worker reported failure: {}", context_message)
+            if isinstance(context_message, str) and "tool" in context_message.lower():
+                log.bind(agent="WORKFORCE").warning("Workforce worker reported missing tool: {}", context_message)
+
+        formatted: Dict[str, Any] = {
+            "success": success,
+            "text": text,
+            "messages": messages,
+            "raw": raw,
+        }
+        if error_text:
+            formatted["error"] = error_text
+        return formatted
 

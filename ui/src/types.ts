@@ -180,3 +180,32 @@ export interface PortfolioTradesResponse {
   total: number;
 }
 
+export interface AiDecisionStep {
+  step: string;
+  description?: string;
+  result?: string;
+  messages?: string[];
+  timestamp?: string;
+}
+
+export interface AiDecision {
+  decision_id?: string;
+  ticker?: string;
+  action?: string;
+  status?: string;
+  task_description?: string;
+  result?: string;
+  result_text?: string;
+  result_raw?: unknown;
+  completed_at?: string;
+  timestamp?: string;
+  error?: string;
+  steps?: AiDecisionStep[];
+}
+
+export interface AiDecisionResponse {
+  decisions: AiDecision[];
+  count: number;
+  total: number;
+}
+

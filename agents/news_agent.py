@@ -15,6 +15,7 @@ from core.models import (
     AgentType,
     AgentMessage,
     AgentSignal,
+    FactInsight,
     MessageType,
     NewsSentiment,
     SignalType,
@@ -26,6 +27,7 @@ from core.research import (
     fetch_google_scholar_entries,
     fetch_yahoo_finance_headlines,
 )
+from core.pipelines.storage import get_fact_insight
 
 
 class NewsAgent(BaseAgent):
@@ -38,6 +40,7 @@ class NewsAgent(BaseAgent):
         self.mock_llm_service = None
         self.use_mock = settings.use_mock_services
         self._use_gemini = False
+        self.llm_model_name = settings.news_llm_model
         self.source_weights: Dict[str, float] = settings.news_source_weights.copy()
         self._mock_fallback_warned = False
         
@@ -48,26 +51,37 @@ class NewsAgent(BaseAgent):
             self.mock_llm_service = await get_mock_llm_service()
             log.bind(agent="NEWS").info("News agent initialized with mock LLM service")
         else:
-            # Initialize OpenAI client (works with VLLM endpoints too)
+            # Initialize OpenAI-compatible client (OpenRouter/OpenAI/VLLM)
             if settings.vllm_endpoint:
                 self.llm_client = AsyncOpenAI(
                     api_key="dummy",  # VLLM doesn't require real key
                     base_url=settings.vllm_endpoint
                 )
             elif settings.openai_api_key:
-                self.llm_client = AsyncOpenAI(api_key=settings.openai_api_key)
+                client_kwargs = settings.openai_client_kwargs
+                client_kwargs.setdefault("timeout", 30.0)
+                client_kwargs.setdefault("max_retries", 2)
+                self.llm_client = AsyncOpenAI(
+                    api_key=settings.openai_api_key,
+                    **client_kwargs,
+                )
             elif settings.gemini_api_key:
                 self._use_gemini = True
             else:
                 log.warning("No LLM endpoint configured, News Agent will have limited functionality")
             
-            log.bind(agent="NEWS").info("News agent initialized with real LLM service")
+            if self.llm_client:
+                log.bind(agent="NEWS").info("News agent initialized with real LLM service")
+            elif self._use_gemini:
+                log.bind(agent="NEWS").info("News agent configured to use Gemini service")
 
         if self.http_client is None:
             self.http_client = httpx.AsyncClient(timeout=30.0)
     
     async def _ensure_mock_service(self) -> bool:
         """Initialise the mock LLM service if available."""
+        if not self.use_mock:
+            return False
         if self.mock_llm_service:
             return True
 
@@ -131,6 +145,54 @@ class NewsAgent(BaseAgent):
         parts = candidates[0].get("content", {}).get("parts", [])
         text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
         return text.strip() if text else None
+    
+    async def _execute_json_prompt(self, system_prompt: str, user_prompt: str, max_tokens: int) -> Optional[str]:
+        """Execute an LLM completion with lightweight retry logic."""
+        attempts = 3
+        delay = 0.7
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                if self._use_gemini:
+                    merged_prompt = f"{system_prompt}\n\n{user_prompt}"
+                    content = await self._gemini_generate(merged_prompt, max_tokens=max_tokens)
+                else:
+                    if not self.llm_client:
+                        return None
+                    response = await self.llm_client.chat.completions.create(
+                        model=self.llm_model_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=0.3,
+                        max_tokens=max_tokens,
+                        response_format={"type": "json_object"},
+                    )
+                    message = response.choices[0].message
+                    content = getattr(message, "content", None)
+                    if not content and hasattr(message, "parsed"):
+                        try:
+                            return json.dumps(message.parsed)
+                        except TypeError:
+                            content = json.dumps(message.parsed, default=str)
+
+                if content:
+                    return content
+                last_error = RuntimeError("Empty completion response")
+            except Exception as exc:
+                last_error = exc
+                log.bind(agent="NEWS", attempt=attempt, total_attempts=attempts).warning(
+                    "LLM completion failed: {}", exc
+                )
+                await asyncio.sleep(delay)
+                delay *= 1.6
+
+        if last_error:
+            log.bind(agent="NEWS").error("LLM completion exhausted retries: {}", last_error)
+            raise RuntimeError(str(last_error))
+        return None
     
     async def run_cycle(self):
         """Run periodic news monitoring and sentiment analysis."""
@@ -402,12 +464,14 @@ class NewsAgent(BaseAgent):
             return
 
         if not self.llm_client and not self._use_gemini:
-            await self._analyze_news_sentiment_mock(news_item)
+            log.bind(agent="NEWS").error("No LLM client configured; skipping sentiment analysis.")
+            await self._apply_fact_guardrail_for_tickers(news_item, [])
             return
-        
+
         try:
             title = news_item.get("title", "")
             currencies = news_item.get("currencies", [])
+            source_weight = self._resolve_source_weight(news_item.get("source_key"))
             
             # Create prompt for sentiment analysis
             prompt = f"""Analyze the sentiment of this crypto news headline and provide a sentiment score.
@@ -423,28 +487,17 @@ Provide:
 Respond in JSON format:
 {{"sentiment_score": <float>, "confidence": <float>, "explanation": "<string>"}}"""
             
-            if self._use_gemini:
-                content = await self._gemini_generate(prompt, max_tokens=200)
-                if not content:
-                    return
-            else:
-                response = await self.llm_client.chat.completions.create(
-                    model="gpt-4.1-mini",  # Will use VLLM model if configured
-                    messages=[
-                        {"role": "system", "content": "You are a crypto market sentiment analyst. Respond only with valid JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.3,
-                    max_tokens=200
-                )
-                content = response.choices[0].message.content
+            content = await self._execute_json_prompt(
+                system_prompt="You are a crypto market sentiment analyst. Respond only with valid JSON.",
+                user_prompt=prompt,
+                max_tokens=200,
+            )
             sentiment_data = self._extract_json_response(content)
             if not sentiment_data:
-                return
+                raise RuntimeError("Unable to parse LLM sentiment response")
 
             sentiment_score = float(sentiment_data.get("sentiment_score", 0.0))
             base_confidence = float(sentiment_data.get("confidence", 0.5))
-            source_weight = self._resolve_source_weight(news_item.get("source_key"))
             confidence = min(1.0, max(base_confidence, 0.2) * (0.6 + source_weight))
             explanation = sentiment_data.get("explanation", "")
 
@@ -467,28 +520,13 @@ Respond in JSON format:
                     timestamp=datetime.utcnow()
                 )
 
-                await self.redis.set_json(
-                    f"news:sentiment:{ticker}",
-                    {**sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
-                    expire=3600  # 1 hour
-                )
+                await self._persist_ticker_sentiment(sentiment, source_weight)
 
-                if abs(sentiment_score) > 0.5 and confidence > 0.7:
-                    await self._send_sentiment_signal(sentiment)
-
-                await self._broadcast_news_event(
-                    ticker,
-                    sentiment_score,
-                    confidence,
-                    sentiment.summary,
-                    sentiment.sources,
-                    source_weight,
-                )
-            
         except Exception as e:
             log.error(f"Error analyzing news sentiment: {e}")
-            if not self.use_mock:
-                await self._analyze_news_sentiment_mock(news_item)
+            affected_tickers = news_item.get("currencies") or self._infer_currencies(news_item.get("title", ""))
+            news_item["error_reason"] = str(e)
+            await self._apply_fact_guardrail_for_tickers(news_item, affected_tickers)
 
     async def _fetch_primary_headlines(self) -> List[Dict[str, Any]]:
         if not self.http_client:
@@ -531,7 +569,7 @@ Respond in JSON format:
             return
 
         if not self.llm_client and not self._use_gemini:
-            await self._generate_market_sentiment_mock(news_items)
+            log.bind(agent="NEWS").error("No LLM client configured; skipping market sentiment.")
             return
 
         try:
@@ -551,21 +589,13 @@ Provide:
 Respond in JSON format:
 {{"sentiment_score": <float>, "confidence": <float>, "summary": "<string>"}}"""
             
-            if self._use_gemini:
-                content = await self._gemini_generate(prompt, max_tokens=300)
-                if not content:
-                    return
-            else:
-                response = await self.llm_client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[
-                        {"role": "system", "content": "You are a crypto market analyst. Respond only with valid JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.3,
-                    max_tokens=300
-                )
-                content = response.choices[0].message.content
+            content = await self._execute_json_prompt(
+                system_prompt="You are a crypto market analyst. Respond only with valid JSON.",
+                user_prompt=prompt,
+                max_tokens=300,
+            )
+            if not content:
+                raise RuntimeError("Empty response for market sentiment prompt")
             sentiment_data = self._extract_json_response(content)
             if not sentiment_data:
                 return
@@ -583,29 +613,22 @@ Respond in JSON format:
                 sources=[item.get("source", "Unknown") for item in news_items[:5]],
                 timestamp=datetime.utcnow()
             )
-
-            await self.redis.set_json(
-                "news:market_sentiment",
-                {**market_sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
-                expire=3600
-            )
-
-            log.bind(agent="NEWS").info(
-                "Market sentiment score=%.2f confidence=%.2f",
-                market_sentiment.sentiment_score,
-                market_sentiment.confidence,
-            )
-            await self._broadcast_news_event(
-                None,
-                market_sentiment.sentiment_score,
-                market_sentiment.confidence,
-                market_sentiment.summary,
-                market_sentiment.sources,
-                avg_weight,
-            )
+            await self._persist_market_sentiment(market_sentiment, avg_weight)
         except Exception as e:
             log.error(f"Error generating market sentiment: {e}")
-            await self._generate_market_sentiment_mock(news_items)
+            guardrail = await self._fact_guardrail(None, f"Market overview fallback ({e})")
+            if guardrail:
+                await self._persist_market_sentiment(guardrail, 0.0)
+            else:
+                fallback = NewsSentiment(
+                    ticker=None,
+                    sentiment_score=0.0,
+                    confidence=0.1,
+                    summary=f"[degraded] Unable to compute market sentiment (reason: {e})",
+                    sources=["NewsAgent"],
+                    timestamp=datetime.utcnow(),
+                )
+                await self._persist_market_sentiment(fallback, 0.0)
 
     async def _generate_market_sentiment_mock(self, news_items: List[Dict]) -> None:
         """Generate market sentiment using the mock LLM service."""
@@ -653,6 +676,112 @@ Respond in JSON format:
             avg_weight,
         )
     
+    async def _persist_market_sentiment(self, sentiment: NewsSentiment, avg_weight: float) -> None:
+        await self.redis.set_json(
+            "news:market_sentiment",
+            {**sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
+            expire=3600,
+        )
+
+        log.bind(agent="NEWS").info(
+            "Market sentiment score=%.2f confidence=%.2f",
+            sentiment.sentiment_score,
+            sentiment.confidence,
+        )
+        await self._broadcast_news_event(
+            None,
+            sentiment.sentiment_score,
+            sentiment.confidence,
+            sentiment.summary,
+            sentiment.sources,
+            avg_weight,
+        )
+
+    async def _persist_ticker_sentiment(self, sentiment: NewsSentiment, source_weight: float) -> None:
+        if not sentiment.ticker:
+            return
+
+        await self.redis.set_json(
+            f"news:sentiment:{sentiment.ticker}",
+            {**sentiment.dict(), "generated_at": datetime.utcnow().isoformat()},
+            expire=3600,
+        )
+
+        if abs(sentiment.sentiment_score) > 0.5 and sentiment.confidence > 0.7:
+            await self._send_sentiment_signal(sentiment)
+
+        await self._broadcast_news_event(
+            sentiment.ticker,
+            sentiment.sentiment_score,
+            sentiment.confidence,
+            sentiment.summary,
+            sentiment.sources,
+            source_weight,
+        )
+
+    async def _fact_guardrail(self, ticker: Optional[str], fallback_summary: str) -> Optional[NewsSentiment]:
+        insight: Optional[FactInsight] = await get_fact_insight(self.redis, ticker)
+        if not insight:
+            return None
+
+        resolved_ticker = insight.ticker or ticker
+        summary = insight.thesis or fallback_summary
+        confidence = max(min(insight.confidence, 1.0), 0.2)
+
+        return NewsSentiment(
+            ticker=resolved_ticker,
+            sentiment_score=insight.sentiment_score,
+            confidence=confidence,
+            summary=f"[fact guardrail] {summary}",
+            sources=["FactPipeline"],
+            timestamp=datetime.utcnow(),
+        )
+
+    async def _apply_fact_guardrail_for_tickers(self, news_item: Dict[str, Any], tickers: List[str]) -> None:
+        title = news_item.get("title", "News item")
+        error_reason = news_item.get("error_reason")
+        source_weight = self._resolve_source_weight(news_item.get("source_key"))
+
+        candidates = tickers or [None]
+        applied_guardrail = False
+        for ticker in candidates:
+            guardrail = await self._fact_guardrail(ticker, title)
+            if not guardrail:
+                continue
+            log.bind(agent="NEWS", guardrail=True, ticker=guardrail.ticker or "market").info(
+                "Fact guardrail applied with sentiment %.3f (confidence %.2f)",
+                guardrail.sentiment_score,
+                guardrail.confidence,
+            )
+            if guardrail.ticker:
+                await self._persist_ticker_sentiment(guardrail, source_weight)
+            else:
+                await self._persist_market_sentiment(guardrail, source_weight)
+
+            applied_guardrail = True
+            break
+
+        if not applied_guardrail:
+            fallback_ticker = candidates[0] if candidates else None
+            summary_suffix = ""
+            if error_reason:
+                summary_suffix = f" (reason: {error_reason})"
+            fallback_sentiment = NewsSentiment(
+                ticker=fallback_ticker,
+                sentiment_score=0.0,
+                confidence=0.1,
+                summary=f"[degraded] Unable to analyze sentiment for '{title}'. Using neutral placeholder{summary_suffix}.",
+                sources=[news_item.get("source", "Unknown")],
+                timestamp=datetime.utcnow(),
+            )
+            if fallback_ticker:
+                await self._persist_ticker_sentiment(fallback_sentiment, source_weight)
+            else:
+                await self._persist_market_sentiment(fallback_sentiment, source_weight or 0.0)
+            log.bind(agent="NEWS", guardrail=True).warning(
+                "No fact guardrail available; recorded neutral fallback sentiment for {}", fallback_ticker or "market"
+            )
+
     async def _send_sentiment_signal(self, sentiment: NewsSentiment):
         """Send sentiment signal to orchestrator."""
         try:
@@ -738,12 +867,13 @@ Respond in JSON format:
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            pass
+            log.bind(agent="NEWS").warning("Raw LLM response not pure JSON: {}", content[:500])
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())
             except json.JSONDecodeError:
+                log.bind(agent="NEWS").debug("Failed to parse JSON fragment from response: {}", match.group()[:500])
                 return None
         return None
 

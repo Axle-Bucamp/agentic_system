@@ -4,7 +4,7 @@ Configuration management for the Agentic Trading System.
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 from pydantic import Field, ConfigDict, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     
     # External APIs
     mcp_api_url: str = Field(default="https://forecasting.guidry-cloud.com", env="MCP_API_URL")
-    mcp_api_key: Optional[str] = Field(default="mock_api_key", env="MCP_API_KEY")
+    mcp_api_key: Optional[str] = Field(default="sk_jDHFvVDCU8bF4caeenG96jnKbYIET4wcDm3qBzNWXVc", env="MCP_API_KEY")
     dex_simulator_url: str = Field(default="http://localhost:8001", env="DEX_SIMULATOR_URL")
     
     # Blockscout MCP Configuration
@@ -61,7 +61,12 @@ class Settings(BaseSettings):
     
     # LLM Configuration
     openai_api_key: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
+    openai_base_url: Optional[str] = Field(default=None, env="OPENAI_BASE_URL")
     gemini_api_key: Optional[str] = Field(default=None, env="GEMINI_API_KEY")
+    openrouter_api_key: Optional[str] = Field(default=None, env="OPENROUTER_API_KEY")
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", env="OPENROUTER_BASE_URL")
+    openrouter_title: str = Field(default="Agentic Trading System", env="OPENROUTER_TITLE")
+    openrouter_referer: Optional[str] = Field(default="http://localhost", env="OPENROUTER_REFERER")
     vllm_endpoint: Optional[str] = Field(default="http://localhost:8002/v1", env="VLLM_ENDPOINT")
     
     # CAMEL Configuration (default to stable Gemini 1.5 Pro for best compatibility)
@@ -69,9 +74,9 @@ class Settings(BaseSettings):
     camel_coordinator_model: str = Field(default="auto", env="CAMEL_COORDINATOR_MODEL")
     camel_task_model: str = Field(default="auto", env="CAMEL_TASK_MODEL")
     camel_worker_model: str = Field(default="auto", env="CAMEL_WORKER_MODEL")
-    camel_primary_model: str = Field(default="gemini-1.5-pro", env="CAMEL_PRIMARY_MODEL")
-    camel_fallback_model: str = Field(default="gpt-4o-mini", env="CAMEL_FALLBACK_MODEL")
-    camel_prefer_gemini: bool = Field(default=True, env="CAMEL_PREFER_GEMINI")
+    camel_primary_model: str = Field(default="openrouter_llama_4_maverick_free", env="CAMEL_PRIMARY_MODEL")
+    camel_fallback_model: str = Field(default="openai/gpt-4o-mini", env="CAMEL_FALLBACK_MODEL")
+    camel_prefer_gemini: bool = Field(default=False, env="CAMEL_PREFER_GEMINI")
     
     # Qdrant Configuration
     qdrant_host: str = Field(default="localhost", env="QDRANT_HOST")
@@ -96,6 +101,7 @@ class Settings(BaseSettings):
         default="Review recent agent performance, adjust coordination weights to maximize risk-adjusted returns, and surface rationale for any changes. Keep weights normalized to 1.0.",
         env="REVIEW_PROMPT_DEFAULT",
     )
+    news_llm_model: str = Field(default="openai/gpt-4o-mini", env="NEWS_LLM_MODEL")
     
     # Ollama Configuration
     ollama_url: str = Field(default="http://ollama:11434", env="OLLAMA_URL")
@@ -228,6 +234,48 @@ class Settings(BaseSettings):
     log_redis_list_key: str = Field(default="logs:recent", env="LOG_REDIS_LIST_KEY")
     log_redis_max_entries: int = Field(default=1000, env="LOG_REDIS_MAX_ENTRIES")
 
+    @model_validator(mode="after")
+    def _apply_api_key_aliases(self) -> "Settings":
+        """Populate API keys from alternate environment variable names when provided."""
+        if not self.gemini_api_key:
+            alias = (
+                os.getenv("GOOGLE_API_KEY")
+                or os.getenv("GOOGLE_STUDIO_API_KEY")
+                or os.getenv("GOOGLE_GENAI_API_KEY")
+                or os.getenv("GEMINI_APIKEY")
+                or os.getenv("GEMINI_API_KEY")
+            )
+            if alias:
+                self.gemini_api_key = alias.strip()
+
+        if not self.openrouter_api_key:
+            alias = os.getenv("OPEN_ROUTEUR_API")
+            if alias:
+                self.openrouter_api_key = alias.strip()
+
+        if not self.openai_api_key and self.openrouter_api_key:
+            self.openai_api_key = self.openrouter_api_key
+
+        if self.openrouter_api_key and not self.openai_base_url:
+            self.openai_base_url = self.openrouter_base_url
+        if self.openrouter_api_key and not self.openrouter_referer:
+            self.openrouter_referer = "https://openrouter.ai"
+
+        # If no Gemini key available, ensure CAMEL defaults fall back to GPT
+        if not self.gemini_api_key:
+            self.camel_prefer_gemini = False
+            if not (self.camel_primary_model.lower().startswith("gpt") or self.camel_primary_model.lower().startswith("openrouter")):
+                self.camel_primary_model = "gpt-4o-mini"
+            if not (self.camel_fallback_model.lower().startswith("gpt") or self.camel_fallback_model.lower().startswith("openrouter")):
+                self.camel_fallback_model = "gpt-4o-mini"
+        if not self.openrouter_api_key:
+            if self.camel_primary_model.lower().startswith("openrouter"):
+                self.camel_primary_model = "gpt-4o-mini"
+            if self.camel_fallback_model.lower().startswith("openrouter"):
+                self.camel_fallback_model = "gpt-4o-mini"
+
+        return self
+
     @model_validator(mode="before")
     @classmethod
     def _coerce_blank_env_entries(cls, data: Dict[str, object]):
@@ -287,6 +335,25 @@ class Settings(BaseSettings):
     def qdrant_url(self) -> str:
         """Construct Qdrant URL."""
         return f"http://{self.qdrant_host}:{self.qdrant_port}"
+
+    @property
+    def openai_headers(self) -> Dict[str, str]:
+        headers: Dict[str, str] = {}
+        if self.openrouter_referer:
+            headers["HTTP-Referer"] = self.openrouter_referer
+        if self.openrouter_title:
+            headers["X-Title"] = self.openrouter_title
+        return headers
+
+    @property
+    def openai_client_kwargs(self) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {}
+        if self.openai_base_url:
+            kwargs["base_url"] = self.openai_base_url
+        headers = self.openai_headers
+        if headers:
+            kwargs["default_headers"] = headers
+        return kwargs
 
     @property
     def neo4j_enabled(self) -> bool:

@@ -214,6 +214,33 @@ async def _get_chat_history(user_id: str, limit: Optional[int] = None) -> List[D
     return history
 
 
+async def _load_recent_ai_decisions(limit: int = 3) -> List[Dict[str, Any]]:
+    """Fetch recent AI decision metadata for chat grounding."""
+    if not redis_client.redis:
+        return []
+
+    try:
+        keys = await redis_client.redis.keys("ai_decision:*")
+    except Exception as exc:  # pragma: no cover - defensive logging
+        log.warning("Unable to enumerate ai_decision keys: %s", exc)
+        return []
+
+    decisions: List[Dict[str, Any]] = []
+    for key in keys:
+        try:
+            decision = await redis_client.get_json(key)
+        except Exception as exc:  # pragma: no cover
+            log.warning("Failed to load decision %s: %s", key, exc)
+            continue
+
+        if decision:
+            decision.setdefault("decision_id", key.split(":", 1)[-1])
+            decisions.append(decision)
+
+    decisions.sort(key=lambda item: item.get("completed_at") or item.get("timestamp", ""), reverse=True)
+    return decisions[:limit]
+
+
 async def _generate_chat_response(user_id: str, prompt: str) -> str:
     fusion_items: List[Dict[str, Any]] = []
     for ticker in asset_registry.get_assets():
@@ -223,9 +250,30 @@ async def _generate_chat_response(user_id: str, prompt: str) -> str:
 
     fusion_items.sort(key=lambda item: item.get("percent_allocation", 0.0), reverse=True)
     lines = [f"User prompt: {prompt.strip()}"]
+    recent_decisions = await _load_recent_ai_decisions(limit=4)
 
     if not fusion_items:
-        lines.append("Analyst: No fresh fusion signals available yet. Keep positions neutral for now.")
+        if recent_decisions:
+            head = recent_decisions[0]
+            ticker = head.get("ticker") or "Market"
+            action = head.get("action") or "HOLD"
+            result = head.get("result") or head.get("result_text") or "[no agent response captured]"
+            status = head.get("status", "unknown").upper()
+            lines.append(
+                f"Analyst: Latest workforce decision for {ticker} ({action}) [{status}] -> {result}"
+            )
+            if head.get("error"):
+                lines.append(f"Guardrail: {head['error']}")
+            if len(recent_decisions) > 1:
+                summaries = []
+                for decision in recent_decisions[1:]:
+                    summaries.append(
+                        f"{decision.get('ticker', 'Market')} {decision.get('action', 'HOLD')} "
+                        f"({decision.get('status', 'unknown')})"
+                    )
+                lines.append("Recent queue: " + ", ".join(summaries))
+        else:
+            lines.append("Analyst: No fresh fusion signals available yet. Keep positions neutral for now.")
         return "\n".join(lines)
 
     top_pick = fusion_items[0]
@@ -247,6 +295,18 @@ async def _generate_chat_response(user_id: str, prompt: str) -> str:
         lines.append("Analyst B: No opposing signal with meaningful conviction. Focus on disciplined sizing.")
 
     lines.append("Moderator: Balance confidence with stop-loss levels before acting.")
+
+    if recent_decisions:
+        lines.append("")
+        lines.append("Decision Log Highlights:")
+        for decision in recent_decisions[:3]:
+            lines.append(
+                f"- {decision.get('ticker', 'Market')} {decision.get('action', 'HOLD')} "
+                f"[{decision.get('status', 'unknown')}]: {decision.get('result', decision.get('result_text', 'n/a'))}"
+            )
+            if decision.get("error"):
+                lines.append(f"  Guardrail: {decision['error']}")
+
     return "\n".join(lines)
 
 
@@ -1120,6 +1180,7 @@ async def get_ai_decisions(limit: int = 50):
         for key in keys[:limit]:
             decision = await redis_client.get_json(key)
             if decision:
+                decision.setdefault("decision_id", key.split(":", 1)[-1])
                 decisions.append(decision)
         
         # Sort by timestamp (newest first)
@@ -1142,6 +1203,7 @@ async def get_ai_decision(decision_id: str):
         decision = await redis_client.get_json(f"ai_decision:{decision_id}")
         if not decision:
             raise HTTPException(status_code=404, detail=f"Decision {decision_id} not found")
+        decision.setdefault("decision_id", decision_id)
         return decision
     except HTTPException:
         raise

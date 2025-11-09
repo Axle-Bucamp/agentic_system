@@ -129,9 +129,14 @@ services:
       - POSTGRES_PASSWORD=trading_pass_change_in_prod
       - DEX_SIMULATOR_URL=http://dex-simulator:8000
       - MCP_API_URL=https://forecasting.guidry-cloud.com
-      - MCP_API_KEY=${MCP_API_KEY:-mock_api_key}
+      - MCP_API_KEY=${MCP_API_KEY:-sk_jDHFvVDCU8bF4caeenG96jnKbYIET4wcDm3qBzNWXVc}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_TITLE=${OPENROUTER_TITLE:-Agentic Trading System}
+      - OPENROUTER_REFERER=${OPENROUTER_REFERER:-https://openrouter.ai}
       - VLLM_ENDPOINT=${VLLM_ENDPOINT:-http://localhost:8002/v1}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
@@ -154,6 +159,10 @@ services:
       - MEMORY_PRUNE_SIMILARITY_THRESHOLD=${MEMORY_PRUNE_SIMILARITY_THRESHOLD:-0.82}
       - REVIEW_INTERVAL_HOURS=${REVIEW_INTERVAL_HOURS:-24}
       - REVIEW_PROMPT_DEFAULT=${REVIEW_PROMPT_DEFAULT:-}
+      - NEWS_LLM_MODEL=${NEWS_LLM_MODEL:-openai/gpt-4o-mini}
+      - CAMEL_PRIMARY_MODEL=${CAMEL_PRIMARY_MODEL:-openrouter_llama_4_maverick_free}
+      - CAMEL_FALLBACK_MODEL=${CAMEL_FALLBACK_MODEL:-openai/gpt-4o-mini}
+      - CAMEL_PREFER_GEMINI=${CAMEL_PREFER_GEMINI:-false}
       - CHAT_AGENT_MODEL=${CHAT_AGENT_MODEL:-}
       - CHAT_AGENT_PROMPT=${CHAT_AGENT_PROMPT:-}
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-trading-api}
@@ -258,7 +267,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - MCP_API_URL=https://forecasting.guidry-cloud.com
-      - MCP_API_KEY=${MCP_API_KEY:-mock_api_key}
+      - MCP_API_KEY=${MCP_API_KEY:-sk_jDHFvVDCU8bF4caeenG96jnKbYIET4wcDm3qBzNWXVc}
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-chart-agent}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - AGENT_NAME=chart
@@ -310,6 +319,11 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_TITLE=${OPENROUTER_TITLE:-Agentic Trading System}
+      - OPENROUTER_REFERER=${OPENROUTER_REFERER:-https://openrouter.ai}
       - VLLM_ENDPOINT=${VLLM_ENDPOINT:-http://localhost:8002/v1}
       - AGENT_NAME=news
       - DEEP_SEARCH_API_URL=${DEEP_SEARCH_API_URL:-}
@@ -319,6 +333,7 @@ services:
       - FIRECRAWL_KEY=${FIRECRAWL_KEY:-}
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-news-agent}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
+      - NEWS_LLM_MODEL=${NEWS_LLM_MODEL:-openai/gpt-4o-mini}
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
     depends_on:
       redis:
@@ -388,6 +403,9 @@ services:
       - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-orchestrator}
       - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
+      - CAMEL_PRIMARY_MODEL=${CAMEL_PRIMARY_MODEL:-openrouter_llama_4_maverick_free}
+      - CAMEL_FALLBACK_MODEL=${CAMEL_FALLBACK_MODEL:-openai/gpt-4o-mini}
+      - CAMEL_PREFER_GEMINI=${CAMEL_PREFER_GEMINI:-false}
     depends_on:
       redis:
         condition: service_healthy
@@ -438,7 +456,12 @@ services:
       - MCP_API_URL=https://forecasting.guidry-cloud.com
       - MCP_API_KEY=${MCP_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_TITLE=${OPENROUTER_TITLE:-Agentic Trading System}
+      - OPENROUTER_REFERER=${OPENROUTER_REFERER:-https://openrouter.ai}
       - DEEP_SEARCH_API_URL=${DEEP_SEARCH_API_URL:-}
       - DEEP_SEARCH_API_KEY=${DEEP_SEARCH_API_KEY:-}
       - ARXIV_ENABLED=${ARXIV_ENABLED:-true}
@@ -453,6 +476,9 @@ services:
       - AGENT_NAME=workforce
       - FAKE_TRADING=true
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
+      - CAMEL_PRIMARY_MODEL=${CAMEL_PRIMARY_MODEL:-openrouter_llama_4_maverick_free}
+      - CAMEL_FALLBACK_MODEL=${CAMEL_FALLBACK_MODEL:-openrouter_llama_3_1_70b}
+      - CAMEL_PREFER_GEMINI=${CAMEL_PREFER_GEMINI:-false}
     depends_on:
       redis:
         condition: service_healthy

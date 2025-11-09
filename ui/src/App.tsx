@@ -26,6 +26,7 @@ import {
   getAgentRewards,
   getPipelineLiveConfig,
   updatePipelineLiveConfig,
+  getAiDecisions,
 } from "./api";
 import {
   AllocationEntry,
@@ -43,6 +44,7 @@ import {
   DashboardSettings,
   PipelineLiveConfig,
   PipelineLiveEntry,
+  AiDecision,
 } from "./types";
 
 type CopyScoreMap = Record<
@@ -142,6 +144,7 @@ const App = () => {
   const [pipelineIntervals, setPipelineIntervals] = useState<string[]>(["minutes", "hours", "days"]);
   const [pipelineLiveMessage, setPipelineLiveMessage] = useState<string | null>(null);
   const [pipelineLiveBusy, setPipelineLiveBusy] = useState<boolean>(false);
+  const [aiDecisions, setAiDecisions] = useState<AiDecision[]>([]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -162,6 +165,7 @@ const App = () => {
         forecastResponse,
         tradesResponse,
         rewardsResponse,
+        decisionsResponse,
       ] = await Promise.all([
         getWalletPlan(),
         getWalletPlanHistory(12),
@@ -191,6 +195,7 @@ const App = () => {
           total: 0,
         })),
         getAgentRewards().catch(() => ({ rewards: {} })),
+        getAiDecisions().catch(() => ({ decisions: [], count: 0, total: 0 })),
       ]);
 
       setPlan(planResponse.plan);
@@ -229,6 +234,7 @@ const App = () => {
       }
       setRecentTrades(tradesResponse.trades || []);
       setAgentRewards(rewardsResponse.rewards || {});
+      setAiDecisions(decisionsResponse.decisions || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to refresh dashboard");
     } finally {
@@ -434,6 +440,12 @@ const App = () => {
       setPipelineMessage(message);
       if (response.success) {
         void refresh();
+      }
+      try {
+        const decisions = await getAiDecisions();
+        setAiDecisions(decisions.decisions || []);
+      } catch {
+        // best-effort; keep previous decisions
       }
     } catch (err) {
       setPipelineMessage(err instanceof Error ? err.message : "Unable to execute pipeline");
@@ -845,6 +857,69 @@ const App = () => {
               Live-mode configuration unavailable.
             </p>
           )}
+          <div className="decision-log" style={{ marginTop: "1.5rem" }}>
+            <h3>Agent Decision Trace</h3>
+            {aiDecisions.length === 0 ? (
+              <p className="muted">
+                No recent workforce decisions recorded. Trigger a pipeline or wait for the orchestrator to process new signals.
+              </p>
+            ) : (
+              aiDecisions.slice(0, 8).map((decision, index) => {
+                const statusLabel = (decision.status ?? "unknown").toLowerCase();
+                const badgeClass =
+                  statusLabel === "completed"
+                    ? "badge low"
+                    : statusLabel === "degraded"
+                    ? "badge medium"
+                    : "badge high";
+                return (
+                  <details
+                    key={decision.decision_id ?? `${decision.ticker ?? "market"}-${index}`}
+                    className="detail-card"
+                    open={decision.status !== "completed"}
+                  >
+                    <summary>
+                      <strong>{decision.ticker ?? "Market"}</strong> • {decision.action ?? "N/A"} •{" "}
+                      <span className={badgeClass}>{decision.status ?? "unknown"}</span>
+                      {decision.completed_at && (
+                        <span className="muted" style={{ marginLeft: "0.5rem" }}>
+                          {new Date(decision.completed_at).toLocaleTimeString()}
+                        </span>
+                      )}
+                    </summary>
+                    {decision.task_description && <p className="muted">{decision.task_description}</p>}
+                    {decision.steps && decision.steps.length > 0 ? (
+                      <ol className="reference-list">
+                        {decision.steps.map((step, stepIndex) => (
+                          <li key={`${decision.decision_id}-step-${stepIndex}`}>
+                            <strong>{step.step}</strong>
+                            {step.timestamp && (
+                              <span className="muted" style={{ marginLeft: "0.5rem" }}>
+                                {new Date(step.timestamp).toLocaleTimeString()}
+                              </span>
+                            )}
+                            {step.description && <div className="muted">{step.description}</div>}
+                            {step.result && <div>{step.result}</div>}
+                            {step.messages && step.messages.length > 0 && (
+                              <pre className="detail-json">{step.messages.join("\n")}</pre>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p>No step-by-step transcript recorded for this decision.</p>
+                    )}
+                    {decision.result && (
+                      <p>
+                        <strong>Outcome:</strong> {decision.result}
+                      </p>
+                    )}
+                    {decision.error && <p className="error-text">Error: {decision.error}</p>}
+                  </details>
+                );
+              })
+            )}
+          </div>
           {pipelineMessage && <p className="muted">{pipelineMessage}</p>}
         </section>
       </div>

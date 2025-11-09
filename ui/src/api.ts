@@ -13,6 +13,7 @@ import {
   AgentRewardResponse,
   PortfolioTradesResponse,
   PipelineLiveConfig,
+  AiDecisionResponse,
 } from "./types";
 
 async function fetchJSON<T>(url: string): Promise<T> {
@@ -142,4 +143,7 @@ export const getPipelineLiveConfig = () =>
 
 export const updatePipelineLiveConfig = (payload: Record<string, { enabled?: boolean; interval?: string }>) =>
   postJSON<{ pipelines: PipelineLiveConfig }>("/api/pipelines/live-config", { pipelines: payload });
+
+export const getAiDecisions = (limit = 25) =>
+  fetchJSON<AiDecisionResponse>(`/api/ai/decisions?limit=${limit}`);
 
