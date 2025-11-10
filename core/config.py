@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     mcp_api_url: str = Field(default="https://forecasting.guidry-cloud.com", env="MCP_API_URL")
     mcp_api_key: Optional[str] = Field(default="sk_jDHFvVDCU8bF4caeenG96jnKbYIET4wcDm3qBzNWXVc", env="MCP_API_KEY")
     dex_simulator_url: str = Field(default="http://localhost:8001", env="DEX_SIMULATOR_URL")
+    cmc_api_key: Optional[str] = Field(default=None, env="CMC_API_KEY")
     
     # Blockscout MCP Configuration
     blockscout_mcp_url: Optional[str] = Field(

@@ -59,6 +59,8 @@ export interface FusionRecommendation {
   rationale?: string;
   components?: Record<string, unknown>;
   generated_at?: string;
+  agentic?: boolean;
+  ai_explanation?: string | null;
 }
 
 export interface FusionRecommendationsResponse {
@@ -74,6 +76,8 @@ export interface TrendAssessment {
   confidence: number;
   supporting_signals?: Record<string, unknown>;
   generated_at?: string;
+  agentic?: boolean;
+  ai_explanation?: string | null;
 }
 
 export interface FactInsight {
@@ -84,6 +88,10 @@ export interface FactInsight {
   references: Array<Record<string, unknown>>;
   anomalies?: string[];
   generated_at?: string;
+  sentiment_breakdown?: Record<string, unknown>;
+  market_indicators?: Record<string, unknown>;
+  agentic?: boolean;
+  ai_explanation?: string | null;
 }
 
 export interface AgentStatusResponse {
@@ -201,6 +209,8 @@ export interface AiDecision {
   timestamp?: string;
   error?: string;
   steps?: AiDecisionStep[];
+  agentic?: boolean;
+  ai_explanation?: string | null;
 }
 
 export interface AiDecisionResponse {

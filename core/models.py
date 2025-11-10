@@ -157,6 +157,8 @@ class TradeDecision(BaseModel):
     risk_approved: bool
     requires_human_validation: bool = False
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    agentic: bool = True
+    ai_explanation: Optional[str] = None
 
 
 class TradeExecution(BaseModel):
@@ -295,6 +297,8 @@ class TrendAssessment(BaseModel):
     confidence: float
     supporting_signals: Dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=datetime.utcnow)
+    agentic: bool = True
+    ai_explanation: Optional[str] = None
 
 
 class FactInsight(BaseModel):
@@ -305,7 +309,11 @@ class FactInsight(BaseModel):
     thesis: str
     references: List[Dict[str, Any]] = Field(default_factory=list)
     anomalies: List[str] = Field(default_factory=list)
+    sentiment_breakdown: Dict[str, Any] = Field(default_factory=dict)
+    market_indicators: Dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=datetime.utcnow)
+    agentic: bool = True
+    ai_explanation: Optional[str] = None
 
 
 class FusionRecommendation(BaseModel):
@@ -320,4 +328,6 @@ class FusionRecommendation(BaseModel):
     rationale: str
     components: Dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=datetime.utcnow)
+    agentic: bool = True
+    ai_explanation: Optional[str] = None
 

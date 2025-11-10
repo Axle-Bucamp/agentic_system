@@ -13,7 +13,8 @@ from core.config import settings
 from core.logging import log
 from agents.base_agent import BaseAgent
 from core import asset_registry
-from core.forecasting_client import ForecastingClient, ForecastingAPIError
+from core.forecasting_client import ForecastingAPIError
+from core.camel_runtime.registries import toolkit_registry
 
 
 class ChartAgent(BaseAgent):
@@ -21,18 +22,11 @@ class ChartAgent(BaseAgent):
     
     def __init__(self, redis_client):
         super().__init__(AgentType.CHART, redis_client)
-        self.forecasting_client: Optional[ForecastingClient] = None
         
     async def initialize(self):
         """Initialize forecasting API client for fetching market data."""
-        config = {
-            "base_url": settings.mcp_api_url,
-            "api_key": settings.mcp_api_key,
-            "mock_mode": settings.environment == "test" or settings.use_mock_services,
-        }
-        self.forecasting_client = ForecastingClient(config)
-        await self.forecasting_client.connect()
-        log.info("Chart Agent initialized with forecasting client")
+        await toolkit_registry.ensure_clients()
+        log.info("Chart Agent initialized with CAMEL toolkit registry")
     
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
         """Process incoming messages."""
@@ -42,12 +36,6 @@ class ChartAgent(BaseAgent):
                 await self._analyze_ticker(ticker)
         
         return None
-    
-    async def stop(self):
-        if self.forecasting_client:
-            await self.forecasting_client.disconnect()
-            self.forecasting_client = None
-        await super().stop()
     
     async def run_cycle(self):
         """Run periodic technical analysis on all supported assets."""
@@ -119,11 +107,10 @@ class ChartAgent(BaseAgent):
     
     async def _fetch_price_data(self, ticker: str, interval: str) -> Optional[pd.DataFrame]:
         """Fetch historical price data for a ticker."""
-        if not self.forecasting_client:
-            return None
         symbol = asset_registry.get_symbol(ticker)
         try:
-            candles = await self.forecasting_client.get_ohlc(symbol, interval, limit=200)
+            payload = await toolkit_registry.get_ohlc(symbol, interval, limit=200)
+            candles = payload.get("candles", [])
         except ForecastingAPIError as exc:
             log.warning("Forecasting API error fetching OHLC for %s/%s: %s", symbol, interval, exc)
             return None
@@ -170,30 +157,29 @@ class ChartAgent(BaseAgent):
         symbol: str,
         interval: str,
     ) -> Tuple[Optional[Dict[str, float]], Optional[Dict[str, Any]], Optional[float]]:
-        if not self.forecasting_client:
-            return None, None, None
-
         distribution: Optional[Dict[str, float]] = None
         metrics: Optional[Dict[str, Any]] = None
         forecast_price: Optional[float] = None
 
         try:
-            action_payload = await self.forecasting_client.get_action_recommendation(symbol, interval)
-            distribution = self._normalise_distribution(action_payload)
+            action_response = await toolkit_registry.get_action_recommendation(symbol, interval)
+            distribution = self._normalise_distribution(action_response.get("action", {}))
         except ForecastingAPIError as exc:
             log.debug("Unable to fetch action distribution for %s/%s: %s", symbol, interval, exc)
         except Exception as exc:
             log.error("Unexpected error fetching action distribution for %s/%s: %s", symbol, interval, exc)
 
         try:
-            metrics = await self.forecasting_client.get_model_metrics(symbol, interval)
+            metrics_payload = await toolkit_registry.get_model_metrics(symbol, interval)
+            metrics = metrics_payload.get("metrics")
         except ForecastingAPIError as exc:
             log.debug("Unable to fetch model metrics for %s/%s: %s", symbol, interval, exc)
         except Exception as exc:
             log.error("Unexpected error fetching metrics for %s/%s: %s", symbol, interval, exc)
 
         try:
-            forecast_payload = await self.forecasting_client.get_stock_forecast(symbol, interval)
+            forecast_payload = await toolkit_registry.get_stock_forecast(symbol, interval)
+            forecast_payload = forecast_payload.get("forecast", {})
             forecast_price = forecast_payload.get("forecast_price")
             if forecast_price is None:
                 forecast_data = forecast_payload.get("forecast_data")

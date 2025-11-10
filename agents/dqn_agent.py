@@ -10,9 +10,10 @@ from core.models import (
 )
 from core.config import settings
 from core.logging import log
-from core.forecasting_client import ForecastingClient, ForecastingAPIError
+from core.forecasting_client import ForecastingAPIError, AssetNotEnabledError
 from agents.base_agent import BaseAgent
 from core import asset_registry
+from core.camel_runtime.registries import toolkit_registry
 
 
 class DQNAgent(BaseAgent):
@@ -20,21 +21,12 @@ class DQNAgent(BaseAgent):
     
     def __init__(self, redis_client):
         super().__init__(AgentType.DQN, redis_client)
-        self.forecasting_client: Optional[ForecastingClient] = None
         self._supported_assets: List[str] = list(settings.supported_assets)
         
     async def initialize(self):
         """Initialize Forecasting API client."""
-        config = {
-            "base_url": settings.mcp_api_url,
-            "api_key": settings.mcp_api_key,
-            "mock_mode": settings.environment == "test"
-        }
-        
-        self.forecasting_client = ForecastingClient(config)
-        await self.forecasting_client.connect()
-        log.info("DQN Agent initialized with Forecasting API connection")
-
+        await toolkit_registry.ensure_clients()
+        log.info("DQN Agent initialized with CAMEL toolkit registry")
         await self._refresh_supported_assets()
     
     async def process_message(self, message: AgentMessage) -> Optional[AgentMessage]:
@@ -135,13 +127,9 @@ class DQNAgent(BaseAgent):
     async def _get_action_recommendation(self, ticker: str, interval: str) -> Optional[DQNPrediction]:
         """Get action recommendation from Forecasting API."""
         try:
-            if not self.forecasting_client:
-                log.error("Forecasting client not initialized")
-                return None
-            
             api_ticker = asset_registry.get_symbol(ticker)
-            
-            data = await self.forecasting_client.get_action_recommendation(api_ticker, interval)
+            data = await toolkit_registry.get_action_recommendation(api_ticker, interval)
+            data = data.get("action", {})
             
             # Parse action (0=SELL, 1=HOLD, 2=BUY)
             action_map = {0: TradeAction.SELL, 1: TradeAction.HOLD, 2: TradeAction.BUY}
@@ -165,6 +153,17 @@ class DQNAgent(BaseAgent):
                 timestamp=datetime.utcnow()
             )
             
+        except AssetNotEnabledError as e:
+            disabled_ticker = e.ticker.split("-")[0] if getattr(e, "ticker", None) else ticker
+            disabled_ticker = disabled_ticker.upper()
+            log.warning(
+                "Forecasting API reports %s is not enabled; disabling asset until registry refresh",
+                disabled_ticker,
+            )
+            await asset_registry.disable_asset(disabled_ticker)
+            if disabled_ticker != ticker.upper():
+                await asset_registry.disable_asset(ticker)
+            return None
         except ForecastingAPIError as e:
             log.error(f"Forecasting API error getting action for {ticker}/{interval}: {e}")
             return None
@@ -175,14 +174,11 @@ class DQNAgent(BaseAgent):
     async def get_stock_forecast(self, ticker: str, interval: str) -> Optional[Dict]:
         """Get detailed stock forecast from Forecasting API."""
         try:
-            if not self.forecasting_client:
-                log.error("Forecasting client not initialized")
-                return None
-            
             # Convert ticker format (BTC -> BTC-USD)
             api_ticker = asset_registry.get_symbol(ticker)
             
-            return await self.forecasting_client.get_stock_forecast(api_ticker, interval)
+            data = await toolkit_registry.get_stock_forecast(api_ticker, interval)
+            return data.get("forecast")
         except Exception as e:
             log.error(f"Error getting forecast for {ticker}/{interval}: {e}")
             return None
@@ -245,25 +241,18 @@ class DQNAgent(BaseAgent):
     async def get_available_tickers(self) -> List[str]:
         """Get list of available tickers from Forecasting API."""
         try:
-            if not self.forecasting_client:
-                log.error("Forecasting client not initialized")
-                return []
-            
-            tickers = await self.forecasting_client.get_available_tickers()
-            # Convert from API format to internal format
-            return [ticker["symbol"].replace("-USD", "") for ticker in tickers if ticker.get("has_dqn", False)]
+            payload = await toolkit_registry.list_supported_assets()
+            return [symbol.replace("-USD", "") for symbol in payload.get("assets", [])]
         except Exception as e:
             log.error(f"Error getting available tickers: {e}")
             return []
 
     async def _refresh_supported_assets(self) -> None:
         """Fetch available assets from the Forecasting API and update the shared registry."""
-        if not self.forecasting_client:
-            return
-
         try:
-            available = await self.forecasting_client.get_available_tickers()
-            enabled = await self.forecasting_client.get_enabled_assets()
+            available_payload = await toolkit_registry.list_supported_assets()
+            available = available_payload.get("assets", [])
+            enabled = available
             await asset_registry.update_assets(available, enabled)
             self._supported_assets = asset_registry.get_assets()
             log.info("DQN Agent using %d dynamically enabled assets", len(self._supported_assets))

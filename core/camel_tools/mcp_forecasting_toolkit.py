@@ -10,10 +10,12 @@ from core.logging import log
 from core.forecasting_client import ForecastingClient, ForecastingAPIError
 
 try:
+    from camel.toolkits import FunctionTool  # type: ignore
     CAMEL_TOOLS_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - optional dependency
+    FunctionTool = None  # type: ignore
     CAMEL_TOOLS_AVAILABLE = False
-    log.warning("CAMEL tools not available. Install with: pip install camel-ai")
+    log.warning("CAMEL function tools not available. Install with: pip install 'camel-ai[tools]'")
 
 
 class MCPForecastingToolkit:
@@ -258,10 +260,35 @@ class MCPForecastingToolkit:
     
     def get_all_tools(self) -> List:
         """Get all tools in this toolkit."""
-        return [
+        base_tools = [
             self.get_stock_forecast_tool(),
             self.get_action_recommendation_tool(),
             self.list_available_tickers_tool(),
             self.get_metrics_tool(),
         ]
+        return [self._wrap_tool(func) for func in base_tools]
+
+    @staticmethod
+    def _wrap_tool(func):
+        if not CAMEL_TOOLS_AVAILABLE or FunctionTool is None:
+            raise ImportError("CAMEL function tools not installed")
+
+        tool = FunctionTool(func)
+        try:
+            schema = dict(tool.get_openai_tool_schema())
+        except Exception:
+            schema = {
+                "type": "function",
+                "function": {
+                    "name": func.__name__,
+                    "description": func.__doc__ or func.__name__,
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            }
+
+        function_schema = schema.setdefault("function", {})
+        function_schema["name"] = func.__name__
+        function_schema.setdefault("description", func.__doc__ or func.__name__)
+        tool.openai_tool_schema = schema
+        return tool
 

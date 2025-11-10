@@ -8,6 +8,12 @@ from core.logging import log
 from core.models import TradeAction, TrendAssessment
 from core.pipelines.storage import set_trend_assessment
 from core.redis_client import RedisClient
+from core.memory.camel_memory_manager import CamelMemoryManager
+
+try:
+    from camel.messages import BaseMessage
+except ImportError:  # pragma: no cover - optional dependency
+    BaseMessage = None
 
 ACTION_TO_SCORE = {
     TradeAction.BUY.value: 1.0,
@@ -42,6 +48,10 @@ class TrendPipeline:
     def __init__(self, redis: RedisClient, ttl_seconds: int = 300):
         self.redis = redis
         self.ttl_seconds = ttl_seconds
+        try:
+            self._memory_manager = CamelMemoryManager(agent_id="pipeline_trend")
+        except Exception:
+            self._memory_manager = None
 
     async def run_for_ticker(self, ticker: str) -> Optional[TrendAssessment]:
         """Produce and persist a trend assessment for a given ticker."""
@@ -52,6 +62,7 @@ class TrendPipeline:
 
         assessment = self._build_assessment(ticker, inputs)
         await set_trend_assessment(self.redis, assessment, ttl_seconds=self.ttl_seconds)
+        self._record_memory(assessment)
         return assessment
 
     async def _load_inputs(self, ticker: str) -> Optional[TrendInputs]:
@@ -171,7 +182,7 @@ class TrendPipeline:
             "blended_score": blended_score,
         }
 
-        return TrendAssessment(
+        assessment = TrendAssessment(
             ticker=ticker,
             trend_score=trend_score,
             momentum=momentum,
@@ -180,4 +191,27 @@ class TrendPipeline:
             confidence=confidence,
             supporting_signals=supporting_signals,
         )
+        assessment.agentic = True
+        assessment.ai_explanation = (
+            f"Trend analysis recommends {action.value} with confidence {confidence:.2f} "
+            f"based on blended score {blended_score:.2f}."
+        )
+        return assessment
+
+    def _record_memory(self, assessment: TrendAssessment) -> None:
+        if not self._memory_manager or BaseMessage is None:
+            return
+        try:
+            summary = (
+                f"Trend assessment for {assessment.ticker}: "
+                f"{assessment.recommended_action.value} @ confidence {assessment.confidence:.2f}; "
+                f"score={assessment.trend_score:.2f}, momentum={assessment.momentum:.2f}."
+            )
+            message = BaseMessage.make_assistant_message(
+                role_name="TrendPipeline",
+                content=summary,
+            )
+            self._memory_manager.write_record(message)
+        except Exception as exc:  # pragma: no cover
+            log.debug("Unable to write trend pipeline memory: %s", exc)
 

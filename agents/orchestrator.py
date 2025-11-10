@@ -825,19 +825,36 @@ class OrchestratorAgent(BaseAgent):
                 log.error(f"Trade failed for {decision.ticker}: {result.get('error', 'Unknown error')}")
                 return
             
-            # Get current price after execution
+            filled_quantity = float(result.get("filled_quantity", decision.quantity))
+            executed_price = float(
+                result.get("executed_price", decision.expected_price or 0.0)
+            ) or decision.expected_price
+            fee_paid = float(
+                result.get(
+                    "fee_paid",
+                    filled_quantity * executed_price * settings.trading_fee,
+                )
+            )
+            total_cost = float(
+                result.get(
+                    "total_cost_usdc",
+                    filled_quantity * executed_price + fee_paid
+                    if decision.action == TradeAction.BUY
+                    else filled_quantity * executed_price,
+                )
+            )
             portfolio = await self.dex_client.get_portfolio_status()
-            current_price = portfolio.get("prices", {}).get(decision.ticker, decision.expected_price)
-            
+            current_price = portfolio.get("prices", {}).get(decision.ticker, executed_price)
+
             # Create execution record
             execution = TradeExecution(
                 decision_id=str(uuid.uuid4()),
                 ticker=decision.ticker,
                 action=decision.action,
-                quantity=decision.quantity,
+                quantity=filled_quantity,
                 executed_price=current_price,
-                total_cost=decision.quantity * current_price,
-                fee=decision.quantity * current_price * 0.001,  # 0.1% fee
+                total_cost=total_cost,
+                fee=fee_paid,
                 success=True
             )
             

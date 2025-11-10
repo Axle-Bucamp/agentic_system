@@ -104,6 +104,16 @@ const copyScoreLabel = (score?: number) => {
   return `${(score * 100).toFixed(1)}%`;
 };
 
+const agenticBadge = (agentic?: boolean) => {
+  if (agentic === true) {
+    return <span className="badge low">Agentic</span>;
+  }
+  if (agentic === false) {
+    return <span className="badge high">Fallback</span>;
+  }
+  return <span className="badge medium">Unknown</span>;
+};
+
 const App = () => {
   const CHAT_USER_ID = "portfolio-operator";
 
@@ -715,7 +725,10 @@ const App = () => {
             {selectedAgent === "fusion" ? (
               selectedFusion ? (
                 <div className="detail-card">
-                  <h3>{selectedFusion.ticker}</h3>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <h3>{selectedFusion.ticker}</h3>
+                    {agenticBadge(selectedFusion.agentic)}
+                  </div>
                   <p>
                     Action: <strong>{selectedFusion.action}</strong> &nbsp; • &nbsp; Confidence:{" "}
                     {(selectedFusion.confidence * 100).toFixed(1)}%
@@ -724,7 +737,14 @@ const App = () => {
                     Allocation target: <strong>{formatPercent(selectedFusion.percent_allocation)}</strong> &nbsp; • &nbsp; Risk level:{" "}
                     {selectedFusion.risk_level}
                   </p>
+                  {selectedFusion.ai_explanation && <p className="muted">{selectedFusion.ai_explanation}</p>}
                   {selectedFusion.rationale && <p className="muted">{selectedFusion.rationale}</p>}
+                  {selectedFusion.components && (
+                    <details>
+                      <summary>Component inputs</summary>
+                      <pre className="detail-json">{JSON.stringify(selectedFusion.components, null, 2)}</pre>
+                    </details>
+                  )}
                 </div>
               ) : (
                 <p className="muted">No fusion output yet for {selectedTicker || "selected ticker"}.</p>
@@ -732,7 +752,10 @@ const App = () => {
             ) : selectedAgent === "trend" ? (
               trendDetail ? (
                 <div className="detail-card">
-                  <h3>{trendDetail.ticker}</h3>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <h3>{trendDetail.ticker}</h3>
+                    {agenticBadge(trendDetail.agentic)}
+                  </div>
                   <p>
                     Composite trend score: <strong>{(trendDetail.trend_score * 100).toFixed(1)}%</strong> &nbsp; • &nbsp; Momentum:{" "}
                     {(trendDetail.momentum * 100).toFixed(1)}%
@@ -740,6 +763,7 @@ const App = () => {
                   {trendDetail.volatility != null && (
                     <p>Volatility proxy: {(trendDetail.volatility * 100).toFixed(2)}%</p>
                   )}
+                  {trendDetail.ai_explanation && <p className="muted">{trendDetail.ai_explanation}</p>}
                   <pre className="detail-json">{JSON.stringify(trendDetail.supporting_signals ?? {}, null, 2)}</pre>
                 </div>
               ) : (
@@ -747,19 +771,46 @@ const App = () => {
               )
             ) : factDetail ? (
               <div className="detail-card">
-                <h3>{factDetail.ticker ?? "Market"}</h3>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3>{factDetail.ticker ?? "Market"}</h3>
+                  {agenticBadge(factDetail.agentic)}
+                </div>
                 <p>
                   Sentiment: <strong>{factDetail.sentiment_score.toFixed(2)}</strong> &nbsp; • &nbsp; Confidence:{" "}
                   {(factDetail.confidence * 100).toFixed(1)}%
                 </p>
                 <p>{factDetail.thesis}</p>
-                {factDetail.references.length > 0 && (
+                {factDetail.ai_explanation && <p className="muted">{factDetail.ai_explanation}</p>}
+                {(factDetail.anomalies ?? []).length > 0 && (
                   <ul className="reference-list">
-                    {factDetail.references.slice(0, 3).map((ref, idx) => {
+                    {(factDetail.anomalies ?? []).map((item, idx) => (
+                      <li key={`anomaly-${idx}`}>{item}</li>
+                    ))}
+                  </ul>
+                )}
+                {(factDetail.references ?? []).length > 0 && (
+                  <ul className="reference-list">
+                    {(factDetail.references ?? []).slice(0, 3).map((ref, idx) => {
                       const reference = ref as { title?: string; source?: string };
                       return <li key={idx}>{reference.title ?? reference.source ?? "Referenced insight"}</li>;
                     })}
                   </ul>
+                )}
+                {factDetail.sentiment_breakdown && (
+                  <details>
+                    <summary>Sentiment breakdown</summary>
+                    <pre className="detail-json">
+                      {JSON.stringify(factDetail.sentiment_breakdown, null, 2)}
+                    </pre>
+                  </details>
+                )}
+                {factDetail.market_indicators && (
+                  <details>
+                    <summary>Market indicator snapshot</summary>
+                    <pre className="detail-json">
+                      {JSON.stringify(factDetail.market_indicators, null, 2)}
+                    </pre>
+                  </details>
                 )}
               </div>
             ) : (
@@ -880,7 +931,8 @@ const App = () => {
                   >
                     <summary>
                       <strong>{decision.ticker ?? "Market"}</strong> • {decision.action ?? "N/A"} •{" "}
-                      <span className={badgeClass}>{decision.status ?? "unknown"}</span>
+                      <span className={badgeClass}>{decision.status ?? "unknown"}</span>{" "}
+                      {agenticBadge(decision.agentic)}
                       {decision.completed_at && (
                         <span className="muted" style={{ marginLeft: "0.5rem" }}>
                           {new Date(decision.completed_at).toLocaleTimeString()}
@@ -912,6 +964,11 @@ const App = () => {
                     {decision.result && (
                       <p>
                         <strong>Outcome:</strong> {decision.result}
+                      </p>
+                    )}
+                    {decision.ai_explanation && (
+                      <p className="muted">
+                        <strong>AI Summary:</strong> {decision.ai_explanation}
                       </p>
                     )}
                     {decision.error && <p className="error-text">Error: {decision.error}</p>}
@@ -1040,6 +1097,7 @@ const App = () => {
                   <th>Action</th>
                   <th>Confidence</th>
                   <th>Allocation</th>
+                  <th>Mode</th>
                   <th>Risk</th>
                 </tr>
               </thead>
@@ -1050,6 +1108,7 @@ const App = () => {
                     <td>{item.action}</td>
                     <td>{(item.confidence * 100).toFixed(1)}%</td>
                     <td>{formatPercent(item.percent_allocation)}</td>
+                    <td>{agenticBadge(item.agentic)}</td>
                     <td>{item.risk_level}</td>
                   </tr>
                 ))}

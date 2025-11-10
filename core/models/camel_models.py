@@ -177,15 +177,14 @@ class CamelModelFactory:
             error_msg = str(e)
             log.error(f"Failed to create model {model_name}: {error_msg}")
 
-            if "gemini" in model_name.lower():
-                fallback = cls._attempt_immediate_fallback(
-                    cache_key=cache_key,
-                    build_fn=_build_model,
-                    original_error=error_msg,
-                    model_name=model_name,
-                )
-                if fallback:
-                    return fallback
+            fallback = cls._attempt_immediate_fallback(
+                cache_key=cache_key,
+                build_fn=_build_model,
+                original_error=error_msg,
+                model_name=model_name,
+            )
+            if fallback:
+                return fallback
 
             raise
 

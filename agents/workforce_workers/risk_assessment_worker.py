@@ -9,6 +9,7 @@ from core.logging import log
 from core.memory.camel_memory_manager import CamelMemoryManager
 from core.models.camel_models import CamelModelFactory
 from core.camel_tools.dex_trading_toolkit import DEXTradingToolkit
+from core.camel_tools.guidry_stats_toolkit import GuidryStatsToolkit
 
 try:
     from camel.agents import ChatAgent
@@ -35,6 +36,7 @@ class RiskAssessmentWorker:
         self.agent_id = agent_id
         self.memory_manager: Optional[CamelMemoryManager] = None
         self.dex_toolkit: Optional[DEXTradingToolkit] = None
+        self.stats_toolkit: Optional[GuidryStatsToolkit] = None
         self.agent: Optional[ChatAgent] = None
     
     async def initialize(self):
@@ -49,21 +51,28 @@ class RiskAssessmentWorker:
             # Initialize DEX toolkit for portfolio access
             self.dex_toolkit = DEXTradingToolkit()
             await self.dex_toolkit.initialize()
-            
+
+            self.stats_toolkit = GuidryStatsToolkit()
+            await self.stats_toolkit.initialize()
+
             # Create agent with tools
             model = CamelModelFactory.create_worker_model()
             system_message = BaseMessage.make_assistant_message(
-                role_name="Risk Assessment Worker",
+                role_name="Risk Assessment Specialist",
                 content=(
-                    "You are a risk assessment worker specializing in evaluating "
-                    "trading risks and position sizing. You can assess portfolio risk, "
-                    "calculate position sizes, evaluate drawdowns, and provide risk alerts. "
-                    "You have access to portfolio data via DEX tools. "
-                    "This is your unique capability - only you can perform risk assessment tasks."
+                    "You guard portfolio safety. Execute the following routine:\n"
+                    "1. Verify portfolio context (exposure, balances, open positions). Clarify unknowns.\n"
+                    "2. Inspect guidry-cloud stats via get_guidry_cloud_api_stats to understand forecasting reliability; "
+                    "mirror any degradation in your risk guidance.\n"
+                    "3. Use DEX tools to fetch wallet state, unrealised PnL, and current allocations. "
+                    "Stress-test target trades against risk limits.\n"
+                    "4. Quantify risk metrics (VAR, drawdown, stop-loss) and articulate guardrails.\n"
+                    "5. Report clear go/no-go guidance including maximum size, stop levels, and monitoring actions."
                 )
             )
-            
-            tools = [self.dex_toolkit.get_portfolio_status_tool()]
+
+            tools = self.dex_toolkit.get_all_tools()
+            tools.extend(self.stats_toolkit.get_all_tools())
             
             self.agent = ChatAgent(
                 system_message=system_message,

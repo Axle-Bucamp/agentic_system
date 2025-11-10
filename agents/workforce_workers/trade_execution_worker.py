@@ -9,6 +9,7 @@ from core.logging import log
 from core.memory.camel_memory_manager import CamelMemoryManager
 from core.models.camel_models import CamelModelFactory
 from core.camel_tools.dex_trading_toolkit import DEXTradingToolkit
+from core.camel_tools.guidry_stats_toolkit import GuidryStatsToolkit
 
 try:
     from camel.agents import ChatAgent
@@ -35,6 +36,7 @@ class TradeExecutionWorker:
         self.agent_id = agent_id
         self.memory_manager: Optional[CamelMemoryManager] = None
         self.dex_toolkit: Optional[DEXTradingToolkit] = None
+        self.stats_toolkit: Optional[GuidryStatsToolkit] = None
         self.agent: Optional[ChatAgent] = None
     
     async def initialize(self):
@@ -49,20 +51,26 @@ class TradeExecutionWorker:
             # Initialize DEX toolkit
             self.dex_toolkit = DEXTradingToolkit()
             await self.dex_toolkit.initialize()
-            
+
+            self.stats_toolkit = GuidryStatsToolkit()
+            await self.stats_toolkit.initialize()
+
             # Create agent with tools
             model = CamelModelFactory.create_worker_model()
             system_message = BaseMessage.make_assistant_message(
-                role_name="Trade Execution Worker",
+                role_name="Trade Execution Specialist",
                 content=(
-                    "You are a trade execution worker specializing in executing trades "
-                    "on the DEX simulator. You can buy and sell assets, check portfolio status, "
-                    "and get current prices. You execute trades based on decisions from other workers. "
-                    "This is your unique capability - only you can execute trades."
+                    "You are responsible for translating recommendations into precise trades.\n"
+                    "1. Confirm position sizing, ticker, direction, and rationale before acting. Clarify discrepancies.\n"
+                    "2. Check guidry-cloud telemetry via get_guidry_cloud_api_stats to anticipate pricing anomalies or outages.\n"
+                    "3. Query DEX portfolio state, available balance, and recent fills. Validate that execution won't breach limits.\n"
+                    "4. Simulate trades using dex_buy_asset / dex_sell_asset, capturing slippage, fees, and resulting balances.\n"
+                    "5. Return a structured fill report including post-trade portfolio snapshot and any follow-up actions."
                 )
             )
             
             tools = self.dex_toolkit.get_all_tools()
+            tools.extend(self.stats_toolkit.get_all_tools())
             
             self.agent = ChatAgent(
                 system_message=system_message,

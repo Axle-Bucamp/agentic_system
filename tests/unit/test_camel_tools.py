@@ -3,6 +3,7 @@ Unit tests for CAMEL tools integration.
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from camel.toolkits import FunctionTool
 from core.camel_tools.mcp_forecasting_toolkit import MCPForecastingToolkit
 from core.camel_tools.dex_trading_toolkit import DEXTradingToolkit
 from core.camel_tools.market_data_toolkit import MarketDataToolkit
@@ -116,5 +117,5 @@ def test_get_all_tools():
     tools = toolkit.get_all_tools()
     
     assert len(tools) > 0
-    assert all(callable(tool) for tool in tools)
+    assert all(isinstance(tool, FunctionTool) for tool in tools)
 

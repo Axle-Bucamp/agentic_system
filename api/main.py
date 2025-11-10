@@ -30,7 +30,7 @@ from core.forecasting_client import forecasting_client
 from core.models import (
     Portfolio, PerformanceMetrics, HumanValidationRequest,
     HumanValidationResponse, TradeDecision, AgentMessage, MessageType,
-    TradeAction, ExchangeType, RiskMetrics
+    TradeAction, ExchangeType, RiskMetrics, AgentSignal, SignalType, AgentType as CoreAgentType
 )
 from core.memory.graph_memory import GraphMemoryManager
 from core.pipelines import (
@@ -46,6 +46,7 @@ from core.pipelines import (
     get_fusion_recommendation,
     set_fusion_recommendation,
 )
+from core.camel_runtime.runtime import CamelTradingRuntime
 # Security imports (commented out for now due to missing dependencies)
 # from core.security.security_middleware import create_security_middleware
 # from core.security.security_monitor import start_security_monitoring
@@ -913,17 +914,36 @@ async def run_trend_pipeline_endpoint(payload: Dict[str, Any]):
             price=price,
             metadata={"assessment": assessment_payload},
         )
+        runtime = await CamelTradingRuntime.instance()
+        trend_signal = AgentSignal(
+            agent_type=CoreAgentType.TREND,
+            signal_type=SignalType.TREND_ASSESSMENT,
+            ticker=ticker,
+            action=assessment.recommended_action,
+            confidence=assessment.confidence,
+            data=assessment_payload,
+            reasoning="Pipeline-triggered trend assessment refresh.",
+        )
+        await runtime.process_signal(trend_signal.dict())
         log.bind(event="pipeline_run", agent="TREND").info(
             "Trend pipeline run for %s -> %s (confidence=%.2f)",
             ticker,
             assessment.recommended_action.value,
             assessment.confidence,
         )
-        return {"success": True, "assessment": assessment.dict()}
+        return {
+            "success": True,
+            "assessment": assessment.model_dump(mode="json"),
+        }
     log.bind(event="pipeline_run", agent="TREND").warning(
         "Trend pipeline insufficient data for %s", ticker
     )
-    return {"success": False, "message": "Insufficient data to compute trend assessment"}
+    return {
+        "success": False,
+        "message": "Insufficient data to compute trend assessment",
+        "agentic": False,
+        "ai_explanation": "Trend pipeline could not source sufficient agentic data; no update generated.",
+    }
 
 
 @app.post("/api/pipelines/fact/run")
@@ -951,17 +971,36 @@ async def run_fact_pipeline_endpoint(payload: Dict[str, Any]):
             price=None,
             metadata={"insight": insight_payload},
         )
+        runtime = await CamelTradingRuntime.instance()
+        fact_signal = AgentSignal(
+            agent_type=CoreAgentType.FACT,
+            signal_type=SignalType.FACT_ASSESSMENT,
+            ticker=ticker,
+            action=TradeAction[action],
+            confidence=insight.confidence,
+            data=insight_payload,
+            reasoning="Pipeline-triggered fact insight refresh.",
+        )
+        await runtime.process_signal(fact_signal.dict())
         log.bind(event="pipeline_run", agent="FACT").info(
             "Fact pipeline run for %s sentiment=%.2f -> %s",
             ticker,
             insight.sentiment_score,
             action,
         )
-        return {"success": True, "insight": insight.dict()}
+        return {
+            "success": True,
+            "insight": insight.model_dump(mode="json"),
+        }
     log.bind(event="pipeline_run", agent="FACT").warning(
         "Fact pipeline insufficient data for %s", ticker
     )
-    return {"success": False, "message": "Insufficient data to compute fact insight"}
+    return {
+        "success": False,
+        "message": "Insufficient data to compute fact insight",
+        "agentic": False,
+        "ai_explanation": "Fact pipeline fell back to baseline because no sentiment or research signals were available.",
+    }
 
 
 @app.post("/api/pipelines/fusion/run")
@@ -1011,7 +1050,10 @@ async def run_fusion_pipeline_endpoint(payload: Dict[str, Any]):
         recommendation.action.value,
         recommendation.confidence,
     )
-    return {"success": True, "recommendation": recommendation.dict()}
+    return {
+        "success": True,
+        "recommendation": recommendation.model_dump(mode="json"),
+    }
 
 
 @app.post("/api/pipelines/prune/run")

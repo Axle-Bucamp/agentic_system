@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 from core.config import settings
 from core.logging import log
 from core.camel_tools.mcp_forecasting_toolkit import MCPForecastingToolkit
+from core.camel_tools.guidry_stats_toolkit import GuidryStatsToolkit
 from core.memory.camel_memory_manager import CamelMemoryManager
 from core.models.camel_models import CamelModelFactory
 
@@ -34,6 +35,7 @@ class DQNWorker:
         
         self.agent_id = agent_id
         self.forecasting_toolkit: Optional[MCPForecastingToolkit] = None
+        self.stats_toolkit: Optional[GuidryStatsToolkit] = None
         self.memory_manager: Optional[CamelMemoryManager] = None
         self.agent: Optional[ChatAgent] = None
     
@@ -43,6 +45,9 @@ class DQNWorker:
             # Initialize forecasting toolkit
             self.forecasting_toolkit = MCPForecastingToolkit()
             await self.forecasting_toolkit.initialize()
+
+            self.stats_toolkit = GuidryStatsToolkit()
+            await self.stats_toolkit.initialize()
             
             # Initialize memory
             self.memory_manager = CamelMemoryManager(
@@ -53,17 +58,22 @@ class DQNWorker:
             # Create agent with tools
             model = CamelModelFactory.create_worker_model()
             system_message = BaseMessage.make_assistant_message(
-                role_name="DQN Worker",
+                role_name="Forecast & Policy Specialist",
                 content=(
-                    "You are a DQN prediction worker specializing in forecasting and "
-                    "action recommendations for cryptocurrency trading. "
-                    "You use MCP forecasting API tools to get predictions and forecasts. "
-                    "You can handle multiple types of tasks: getting stock forecasts, "
-                    "getting action recommendations, listing available tickers, and getting metrics."
+                    "You are the workforce's forecasting specialist. Follow this protocol for every task:\n"
+                    "1. Parse the request to extract ticker, interval, and decision horizon. Clarify any gaps.\n"
+                    "2. Inspect guidry-cloud reliability by calling get_guidry_cloud_api_stats and note "
+                    "recent latency spikes, error rates, or disabled assets before issuing expensive requests.\n"
+                    "3. Use forecasting tools to retrieve DQN actions, probability distributions, metrics, and "
+                    "price forecasts. Query list_available_tickers when availability is uncertain.\n"
+                    "4. Analyse returned confidence scores against historical behaviour; flag anomalies or drift.\n"
+                    "5. Produce a structured summary highlighting action, confidence, Q-values, price targets, "
+                    "and any service degradation signals for downstream agents."
                 )
             )
-            
+
             tools = self.forecasting_toolkit.get_all_tools()
+            tools.extend(self.stats_toolkit.get_all_tools())
             
             self.agent = ChatAgent(
                 system_message=system_message,

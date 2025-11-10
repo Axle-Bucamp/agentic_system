@@ -6,6 +6,8 @@ from core.camel_tools.blockscout_toolkit import BlockscoutMCPToolkit, get_blocks
 from core.camel_tools.dex_trading_toolkit import DEXTradingToolkit
 from core.camel_tools.market_data_toolkit import MarketDataToolkit
 from core.camel_tools.crypto_tools import CryptoTools
+from core.camel_tools.guidry_stats_toolkit import GuidryStatsToolkit
+from core.camel_tools.playwright_toolkit import PlaywrightToolkit
 
 __all__ = [
     "MCPForecastingToolkit",
@@ -14,5 +16,7 @@ __all__ = [
     "DEXTradingToolkit",
     "MarketDataToolkit",
     "CryptoTools",
+    "GuidryStatsToolkit",
+    "PlaywrightToolkit",
 ]
 

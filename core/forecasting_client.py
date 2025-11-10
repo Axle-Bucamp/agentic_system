@@ -4,14 +4,25 @@ Forecasting API client for guidry-cloud.com integration.
 import asyncio
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
+from time import perf_counter
 import httpx
+from httpx import TimeoutException
 from core.logging import log
 from core.mocks.mock_forecasting_service import get_mock_forecasting_service
+from core.telemetry.guidry_stats import guidry_cloud_stats
 
 
 class ForecastingAPIError(Exception):
     """Base exception for forecasting API operations."""
     pass
+
+
+class AssetNotEnabledError(ForecastingAPIError):
+    """Raised when the forecasting API reports that an asset is not enabled."""
+
+    def __init__(self, ticker: str, message: str):
+        self.ticker = ticker
+        super().__init__(message)
 
 
 class ForecastingClient:
@@ -204,6 +215,7 @@ class ForecastingClient:
         
         for attempt in range(self.retry_attempts):
             try:
+                start = perf_counter()
                 if method == "GET":
                     response = await self.client.get(endpoint, params=params)
                 elif method == "POST":
@@ -212,21 +224,96 @@ class ForecastingClient:
                     raise ForecastingAPIError(f"Unsupported HTTP method: {method}")
                 
                 response.raise_for_status()
+                duration = perf_counter() - start
+                guidry_cloud_stats.record_success(endpoint, response.status_code, duration)
                 return response.json()
                 
             except httpx.HTTPStatusError as e:
-                if e.response.status_code in [429, 502, 503, 504] and attempt < self.retry_attempts - 1:
+                duration = perf_counter() - start
+                status_code = e.response.status_code
+                detail = self._extract_error_detail(e)
+                ticker = self._extract_ticker_from_endpoint(endpoint, params, data)
+                guidry_cloud_stats.record_failure(
+                    endpoint=endpoint,
+                    status=status_code,
+                    duration_secs=duration,
+                    error=detail,
+                    rate_limited=status_code == 429,
+                    disabled_asset=ticker if detail and "not enabled" in detail.lower() else None,
+                )
+                if e.response.status_code == 400:
+                    if detail and "not enabled" in detail.lower():
+                        raise AssetNotEnabledError(ticker or "UNKNOWN", detail)
+                if status_code in [429, 502, 503, 504] and attempt < self.retry_attempts - 1:
                     # Retry on rate limit or server errors
                     await asyncio.sleep(self.retry_delay * (2 ** attempt))
                     continue
-                raise ForecastingAPIError(f"HTTP error {e.response.status_code}: {e.response.text}")
+                raise ForecastingAPIError(f"HTTP error {status_code}: {e.response.text}")
             except Exception as e:
+                duration = perf_counter() - start
+                guidry_cloud_stats.record_failure(
+                    endpoint=endpoint,
+                    status=0,
+                    duration_secs=duration,
+                    error=str(e),
+                    timeout=isinstance(e, TimeoutException),
+                )
                 if attempt < self.retry_attempts - 1:
                     await asyncio.sleep(self.retry_delay * (2 ** attempt))
                     continue
                 raise ForecastingAPIError(f"Request failed: {e}")
         
         raise ForecastingAPIError("Max retry attempts exceeded")
+
+    @staticmethod
+    def _extract_error_detail(error: httpx.HTTPStatusError) -> Optional[str]:
+        try:
+            payload = error.response.json()
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            for key in ("detail", "message", "error"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    return value
+                if isinstance(value, dict):
+                    nested_detail = value.get("detail") or value.get("message")
+                    if isinstance(nested_detail, str):
+                        return nested_detail
+        elif isinstance(payload, str):
+            return payload
+
+        text = error.response.text
+        return text if text else None
+
+    @staticmethod
+    def _extract_ticker_from_endpoint(
+        endpoint: str,
+        params: Optional[Dict[str, Any]],
+        data: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Best-effort attempt to recover the ticker from the request context."""
+
+        # Direct parameter overrides
+        for source in (params, data):
+            if isinstance(source, dict):
+                ticker = source.get("ticker") or source.get("symbol")
+                if isinstance(ticker, str):
+                    return ticker
+
+        # Endpoints of the form /api/json/action/<symbol>/<interval>
+        parts = endpoint.strip("/").split("/")
+        if len(parts) >= 4 and parts[-3] == "action":
+            return parts[-2]
+        if len(parts) >= 3 and parts[-2] in {"info", "metrics", "ohlc"}:
+            return parts[-1]
+
+        return None
+
+    def get_stats_snapshot(self) -> Dict[str, Any]:
+        """Return current aggregated statistics for Guidry Cloud API usage."""
+        return guidry_cloud_stats.summary()
     
     def _get_cached(self, key: str) -> Optional[Any]:
         """Get cached data if not expired."""
@@ -356,6 +443,8 @@ class ForecastingClient:
                 if isinstance(response, dict) and "forecast" in response and "forecast_price" not in response:
                     response = {**response, "forecast_price": response.get("forecast")}
                 result = response
+            except AssetNotEnabledError:
+                raise
             except Exception as e:
                 log.error(f"Failed to get action recommendation for {ticker}/{interval}: {e}")
                 raise ForecastingAPIError(f"Failed to get action recommendation: {e}")
