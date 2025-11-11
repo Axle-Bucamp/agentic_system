@@ -130,6 +130,7 @@ services:
       - DEX_SIMULATOR_URL=http://dex-simulator:8000
       - MCP_API_URL=https://forecasting.guidry-cloud.com
       - MCP_API_KEY=${MCP_API_KEY:-sk_jDHFvVDCU8bF4caeenG96jnKbYIET4wcDm3qBzNWXVc}
+      - CMC_API_KEY=${CMC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
@@ -146,7 +147,6 @@ services:
       - NEO4J_URI=${NEO4J_URI:-}
       - NEO4J_USER=${NEO4J_USER:-}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
-      - BLOCKSCOUT_MCP_URL=http://blockscout-mcp:8080
       - DEEP_SEARCH_API_URL=${DEEP_SEARCH_API_URL:-}
       - DEEP_SEARCH_API_KEY=${DEEP_SEARCH_API_KEY:-}
       - ARXIV_ENABLED=${ARXIV_ENABLED:-true}
@@ -159,7 +159,7 @@ services:
       - MEMORY_PRUNE_SIMILARITY_THRESHOLD=${MEMORY_PRUNE_SIMILARITY_THRESHOLD:-0.82}
       - REVIEW_INTERVAL_HOURS=${REVIEW_INTERVAL_HOURS:-24}
       - REVIEW_PROMPT_DEFAULT=${REVIEW_PROMPT_DEFAULT:-}
-      - NEWS_LLM_MODEL=${NEWS_LLM_MODEL:-openai/gpt-4o-mini}
+      - NEWS_LLM_MODEL=${NEWS_LLM_MODEL:-openrouter_llama_4_maverick_free}
       - CAMEL_PRIMARY_MODEL=${CAMEL_PRIMARY_MODEL:-openrouter_llama_4_maverick_free}
       - CAMEL_FALLBACK_MODEL=${CAMEL_FALLBACK_MODEL:-openai/gpt-4o-mini}
       - CAMEL_PREFER_GEMINI=${CAMEL_PREFER_GEMINI:-false}
@@ -342,36 +342,6 @@ services:
     networks:
       - ats-network
 
-  # Copy Trade Agent Service
-  copytrade-agent:
-    image: agentic_system/agent-base:latest
-    container_name: ats-copytrade-agent
-    env_file:
-      - .env
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=trading_system
-      - POSTGRES_USER=trading_user
-      - POSTGRES_PASSWORD=trading_pass_change_in_prod
-      - AGENT_NAME=copytrade
-      - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed.binance.org/}
-      - ETH_RPC_URL=${ETH_RPC_URL:-https://eth.llamarpc.com}
-      - SOL_RPC_URL=${SOL_RPC_URL:-https://api.mainnet-beta.solana.com}
-      - AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-ats-copytrade-agent}
-      - CLUSTER_NAME=${CLUSTER_NAME:-local-cluster}
-      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - ats-network
-
   # Orchestrator Agent Service (Legacy)
   orchestrator:
     image: agentic_system/agent-base:latest
@@ -423,8 +393,6 @@ services:
         condition: service_started
       news-agent:
         condition: service_started
-      copytrade-agent:
-        condition: service_started
     restart: unless-stopped
     networks:
       - ats-network
@@ -452,9 +420,9 @@ services:
       - NEO4J_URI=${NEO4J_URI:-}
       - NEO4J_USER=${NEO4J_USER:-}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-}
-      - BLOCKSCOUT_MCP_URL=http://blockscout-mcp:8080
       - MCP_API_URL=https://forecasting.guidry-cloud.com
       - MCP_API_KEY=${MCP_API_KEY}
+      - CMC_API_KEY=${CMC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
@@ -487,8 +455,6 @@ services:
       qdrant:
         condition: service_started
       ollama:
-        condition: service_started
-      blockscout-mcp:
         condition: service_started
       dex-simulator:
         condition: service_healthy
@@ -529,26 +495,6 @@ services:
   #  restart: unless-stopped
   #  networks:
   #    - ats-network
-
-  # Blockscout MCP Proxy - connects to Blockscout MCP for on-chain data
-  blockscout-mcp:
-    image: sparfenyuk/mcp-proxy:latest
-    container_name: ats-blockscout-mcp
-    command:
-      - "--transport"
-      - "streamablehttp"
-      - "https://mcp.blockscout.com/mcp"
-    ports:
-      - "8080:8080"
-    restart: unless-stopped
-    networks:
-      - ats-network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 0"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
 
   # Tools proxy (optional): internal proxy to external MCP endpoints for stable networking & CORS
   tools-proxy:

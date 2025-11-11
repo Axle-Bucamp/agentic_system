@@ -42,8 +42,8 @@ class BlockscoutMCPClient:
         config = config or {}
         # Use proxy if available, otherwise direct endpoint
         self.base_url = config.get(
-            "base_url", 
-            settings.blockscout_mcp_url or "http://blockscout-mcp:8080"
+            "base_url",
+            settings.blockscout_mcp_url or "https://mcp.blockscout.com/mcp"
         )
         self.timeout = config.get("timeout", 30.0)
         self.retry_attempts = config.get("retry_attempts", 3)

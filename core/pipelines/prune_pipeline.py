@@ -4,12 +4,20 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 from core.config import settings
 from core.logging import log
 from core.models import NewsMemoryEntry, TradeAction, TradeMemoryEntry
+
+try:  # Optional dependency
+    from camel.messages import BaseMessage
+except ImportError:  # pragma: no cover - optional dependency
+    BaseMessage = None
+
+if TYPE_CHECKING:  # pragma: no cover - typing aid
+    from core.memory.camel_memory_manager import CamelMemoryManager
 
 
 def _tokenise(text: str) -> set[str]:
@@ -31,7 +39,7 @@ class MemoryPruningPipeline:
 
     SETTINGS_KEY = "dashboard:settings"
 
-    def __init__(self, redis_client, camel_memory=None):
+    def __init__(self, redis_client, camel_memory: Optional["CamelMemoryManager"] = None):
         self.redis = redis_client
         self.camel_memory = camel_memory
         self.limit = settings.memory_prune_limit
@@ -39,10 +47,19 @@ class MemoryPruningPipeline:
 
     async def prune_all(self) -> None:
         await self._refresh_settings()
-        await self.prune_news()
-        await self.prune_trades()
+        news_stats = await self.prune_news()
+        trade_stats = await self.prune_trades()
+        self._record_memory_event(
+            "Memory pruning cycle completed.",
+            extra={
+                "news_pruned": news_stats or {},
+                "trades_pruned": trade_stats or {},
+                "limit": self.limit,
+                "similarity_threshold": self.similarity_threshold,
+            },
+        )
 
-    async def prune_news(self) -> None:
+    async def prune_news(self) -> Optional[Dict[str, Any]]:
         raw_entries = await self.redis.lrange("memory:news", 0, -1)
         entries: List[NewsMemoryEntry] = []
         for raw in raw_entries:
@@ -56,8 +73,9 @@ class MemoryPruningPipeline:
                     continue
             entries.append(parsed)
 
-        if not entries:
-            return
+        original_count = len(entries)
+        if original_count == 0:
+            return {"original_count": 0, "kept_count": 0, "groups": 0}
 
         entries.sort(key=lambda entry: entry.timestamp)
         groups: List[List[NewsMemoryEntry]] = []
@@ -105,12 +123,23 @@ class MemoryPruningPipeline:
             for entry in reversed(grouped[: self.limit]):
                 await self.redis.rpush(key, entry.json())
 
-        log.info("Memory pruning pipeline applied to news entries (kept %d)" % len(trimmed))
+        kept_count = len(trimmed)
+        log.info("Memory pruning pipeline applied to news entries (kept %d)", kept_count)
+        self._record_memory_event(
+            f"Pruned news memory entries (kept {kept_count}).",
+            extra={
+                "original_count": original_count,
+                "kept_count": kept_count,
+                "groups": len(groups),
+            },
+        )
+        return {"original_count": original_count, "kept_count": kept_count, "groups": len(groups)}
 
-    async def prune_trades(self) -> None:
+    async def prune_trades(self) -> Optional[Dict[str, Any]]:
         raw_entries = await self.redis.lrange("memory:trades", 0, -1)
-        if len(raw_entries) <= self.limit:
-            return
+        original_count = len(raw_entries)
+        if original_count <= self.limit:
+            return {"original_count": original_count, "kept_count": original_count}
         entries: List[TradeMemoryEntry] = []
         for raw in raw_entries:
             trade: Optional[TradeMemoryEntry] = None
@@ -156,13 +185,22 @@ class MemoryPruningPipeline:
                     continue
             entries.append(trade)
         if not entries:
-            return
+            return {"original_count": original_count, "kept_count": 0}
         entries.sort(key=lambda entry: entry.timestamp, reverse=True)
         trimmed = entries[: self.limit]
         await self.redis.delete("memory:trades")
         for entry in reversed(trimmed):
             await self.redis.rpush("memory:trades", entry.json())
-        log.info("Memory pruning pipeline trimmed trades to %d entries", len(trimmed))
+        kept_count = len(trimmed)
+        log.info("Memory pruning pipeline trimmed trades to %d entries", kept_count)
+        self._record_memory_event(
+            f"Pruned trade memory entries (kept {kept_count}).",
+            extra={
+                "original_count": original_count,
+                "kept_count": kept_count,
+            },
+        )
+        return {"original_count": original_count, "kept_count": kept_count}
 
     def _group_by_ticker(self, entries: Iterable[NewsMemoryEntry]) -> Dict[Optional[str], List[NewsMemoryEntry]]:
         grouped: Dict[Optional[str], List[NewsMemoryEntry]] = defaultdict(list)
@@ -207,3 +245,15 @@ class MemoryPruningPipeline:
             return datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
             return datetime.utcnow()
+
+    def _record_memory_event(self, content: str, extra: Optional[Dict[str, Any]] = None) -> None:
+        if not self.camel_memory or BaseMessage is None:
+            return
+        try:
+            message = BaseMessage.make_assistant_message(
+                role_name="MemoryPruningPipeline",
+                content=content,
+            )
+            self.camel_memory.write_record(message, extra_info=extra or {})
+        except Exception as exc:  # pragma: no cover - optional dependency logging
+            log.debug("Unable to persist pruning summary to CAMEL memory: %s", exc)

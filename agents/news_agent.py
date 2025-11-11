@@ -6,7 +6,6 @@ import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 import httpx
-from openai import AsyncOpenAI
 
 from agents.base_agent import BaseAgent
 from core.config import settings
@@ -20,6 +19,7 @@ from core.models import (
     NewsSentiment,
     SignalType,
 )
+from core.llm import CamelLLMClient, CamelLLMError
 from core.mocks.mock_llm_service import get_mock_llm_service
 from core.research import (
     fetch_arxiv_entries,
@@ -35,11 +35,10 @@ class NewsAgent(BaseAgent):
     
     def __init__(self, redis_client):
         super().__init__(AgentType.NEWS, redis_client)
-        self.llm_client: Optional[AsyncOpenAI] = None
+        self.llm_client: Optional[CamelLLMClient] = None
         self.http_client: Optional[httpx.AsyncClient] = None
         self.mock_llm_service = None
         self.use_mock = settings.use_mock_services
-        self._use_gemini = False
         self.llm_model_name = settings.news_llm_model
         self.source_weights: Dict[str, float] = settings.news_source_weights.copy()
         self._mock_fallback_warned = False
@@ -47,33 +46,26 @@ class NewsAgent(BaseAgent):
     async def initialize(self):
         """Initialize LLM client and HTTP client."""
         if self.use_mock:
-            # Initialize mock LLM service
             self.mock_llm_service = await get_mock_llm_service()
             log.bind(agent="NEWS").info("News agent initialized with mock LLM service")
         else:
-            # Initialize OpenAI-compatible client (OpenRouter/OpenAI/VLLM)
-            if settings.vllm_endpoint:
-                self.llm_client = AsyncOpenAI(
-                    api_key="dummy",  # VLLM doesn't require real key
-                    base_url=settings.vllm_endpoint
+            try:
+                self.llm_client = CamelLLMClient(
+                    model_name=self.llm_model_name,
+                    temperature=0.25,
+                    system_role="News Sentiment Analyst",
+                    user_role="Market Analyst",
                 )
-            elif settings.openai_api_key:
-                client_kwargs = settings.openai_client_kwargs
-                client_kwargs.setdefault("timeout", 30.0)
-                client_kwargs.setdefault("max_retries", 2)
-                self.llm_client = AsyncOpenAI(
-                    api_key=settings.openai_api_key,
-                    **client_kwargs,
+                await self._verify_llm_connection()
+                log.bind(agent="NEWS").info(
+                    "News agent initialized with CAMEL/OpenRouter model '%s'",
+                    self.llm_model_name,
                 )
-            elif settings.gemini_api_key:
-                self._use_gemini = True
-            else:
-                log.warning("No LLM endpoint configured, News Agent will have limited functionality")
-            
-            if self.llm_client:
-                log.bind(agent="NEWS").info("News agent initialized with real LLM service")
-            elif self._use_gemini:
-                log.bind(agent="NEWS").info("News agent configured to use Gemini service")
+            except CamelLLMError as exc:
+                log.bind(agent="NEWS").error(
+                    "Failed to initialise News LLM client: %s", exc
+                )
+                raise
 
         if self.http_client is None:
             self.http_client = httpx.AsyncClient(timeout=30.0)
@@ -99,52 +91,21 @@ class NewsAgent(BaseAgent):
         """Process incoming messages."""
         # News agent primarily operates on its own cycle
         return None
-    
-    async def _gemini_generate(self, prompt: str, max_tokens: int = 256) -> Optional[str]:
-        """Generate text using Gemini when configured."""
-        if not settings.gemini_api_key:
-            return None
 
-        if not self.http_client:
-            self.http_client = httpx.AsyncClient(timeout=30.0)
+    async def _verify_llm_connection(self) -> None:
+        """Perform a lightweight connectivity probe against the CAMEL model."""
+        if not self.llm_client:
+            raise CamelLLMError("LLM client not initialised")
 
-        model_name = settings.camel_primary_model or "gemini-1.5-pro"
-        if not model_name.lower().startswith("gemini"):
-            model_name = "gemini-1.5-pro"
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}],
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": max(1, min(max_tokens, 1024)),
-            },
-        }
-
-        try:
-            response = await self.http_client.post(
-                url,
-                params={"key": settings.gemini_api_key},
-                json=payload,
-            )
-            response.raise_for_status()
-        except Exception as exc:
-            log.bind(agent="NEWS").error("Gemini request failed: %s", exc)
-            return None
-
-        data = response.json()
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return None
-
-        parts = candidates[0].get("content", {}).get("parts", [])
-        text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
-        return text.strip() if text else None
+        probe_response = await self.llm_client.generate(
+            system_prompt="You are a connectivity probe verifying OpenRouter availability.",
+            user_prompt="Respond with a brief 'OK' if you received this message.",
+        )
+        if not probe_response or not probe_response.strip():
+            raise CamelLLMError("Connectivity probe returned no content")
+        log.bind(agent="NEWS").debug(
+            "Connectivity probe successful (response='%s')", probe_response.strip()[:40]
+        )
     
     async def _execute_json_prompt(self, system_prompt: str, user_prompt: str, max_tokens: int) -> Optional[str]:
         """Execute an LLM completion with lightweight retry logic."""
@@ -154,34 +115,13 @@ class NewsAgent(BaseAgent):
 
         for attempt in range(1, attempts + 1):
             try:
-                if self._use_gemini:
-                    merged_prompt = f"{system_prompt}\n\n{user_prompt}"
-                    content = await self._gemini_generate(merged_prompt, max_tokens=max_tokens)
-                else:
-                    if not self.llm_client:
-                        return None
-                    response = await self.llm_client.chat.completions.create(
-                        model=self.llm_model_name,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        temperature=0.3,
-                        max_tokens=max_tokens,
-                        response_format={"type": "json_object"},
-                    )
-                    message = response.choices[0].message
-                    content = getattr(message, "content", None)
-                    if not content and hasattr(message, "parsed"):
-                        try:
-                            return json.dumps(message.parsed)
-                        except TypeError:
-                            content = json.dumps(message.parsed, default=str)
-
+                if not self.llm_client:
+                    return None
+                content = await self.llm_client.generate(system_prompt, user_prompt)
                 if content:
                     return content
                 last_error = RuntimeError("Empty completion response")
-            except Exception as exc:
+            except (CamelLLMError, Exception) as exc:
                 last_error = exc
                 log.bind(agent="NEWS", attempt=attempt, total_attempts=attempts).warning(
                     "LLM completion failed: {}", exc
@@ -459,11 +399,11 @@ class NewsAgent(BaseAgent):
     
     async def _analyze_news_sentiment(self, news_item: Dict):
         """Analyze sentiment of a news item using LLM."""
-        if self.use_mock:
+        if self.use_mock and not self.llm_client:
             await self._analyze_news_sentiment_mock(news_item)
             return
 
-        if not self.llm_client and not self._use_gemini:
+        if not self.llm_client:
             log.bind(agent="NEWS").error("No LLM client configured; skipping sentiment analysis.")
             await self._apply_fact_guardrail_for_tickers(news_item, [])
             return
@@ -561,14 +501,14 @@ Respond in JSON format:
 
     async def _generate_market_sentiment(self, news_items: List[Dict]):
         """Generate overall market sentiment from multiple news items."""
-        if self.use_mock:
+        if self.use_mock and not self.llm_client:
             await self._generate_market_sentiment_mock(news_items)
             return
 
         if not news_items:
             return
 
-        if not self.llm_client and not self._use_gemini:
+        if not self.llm_client:
             log.bind(agent="NEWS").error("No LLM client configured; skipping market sentiment.")
             return
 

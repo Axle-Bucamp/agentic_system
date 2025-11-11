@@ -135,6 +135,19 @@ export interface LogResponse {
   logfire_enabled: boolean;
 }
 
+export interface ReviewSnapshot {
+  weights: Record<string, number>;
+  previous_weights?: Record<string, number>;
+  generated_at: string;
+  trigger: string;
+  metrics: Record<string, number>;
+  prompt?: string;
+  agentic?: boolean;
+  ai_explanation?: string;
+  failure_reason?: string | null;
+  raw_response?: string;
+}
+
 export interface DashboardSettings {
   schedule_profile: string;
   memory_prune_limit: number;
@@ -144,6 +157,8 @@ export interface DashboardSettings {
   observation_interval: string;
   decision_interval: string;
   forecast_interval: string;
+  latest_review_snapshot?: ReviewSnapshot;
+  last_review_update?: string;
 }
 
 export interface PipelineLiveEntry {

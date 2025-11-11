@@ -10,7 +10,16 @@ from core.memory.camel_memory_manager import CamelMemoryManager
 from core.models.camel_models import CamelModelFactory
 from core.camel_tools.crypto_tools import CryptoTools
 from core.camel_tools.guidry_stats_toolkit import GuidryStatsToolkit
-from core.camel_tools.playwright_toolkit import PlaywrightToolkit
+
+try:
+    from core.camel_tools.asknews_toolkit import AskNewsToolkit
+except ImportError:  # pragma: no cover - optional dependency
+    AskNewsToolkit = None  # type: ignore
+
+try:
+    from core.camel_tools.google_research_toolkit import GoogleResearchToolkit
+except ImportError:  # pragma: no cover - optional dependency
+    GoogleResearchToolkit = None  # type: ignore
 
 try:
     from camel.agents import ChatAgent
@@ -38,7 +47,8 @@ class MarketResearchWorker:
         self.memory_manager: Optional[CamelMemoryManager] = None
         self.crypto_tools: Optional[CryptoTools] = None
         self.stats_toolkit: Optional[GuidryStatsToolkit] = None
-        self.playwright_toolkit: Optional[PlaywrightToolkit] = None
+        self.asknews_toolkit: Optional[AskNewsToolkit] = None
+        self.search_toolkit: Optional[GoogleResearchToolkit] = None
         self.agent: Optional[ChatAgent] = None
 
     async def initialize(self):
@@ -57,18 +67,31 @@ class MarketResearchWorker:
             self.stats_toolkit = GuidryStatsToolkit()
             await self.stats_toolkit.initialize()
 
-            self.playwright_toolkit = PlaywrightToolkit()
-            try:
-                await self.playwright_toolkit.initialize()
-            except ImportError as exc:
-                log.warning("Playwright toolkit unavailable: %s", exc)
-                self.playwright_toolkit = None
+            self.asknews_toolkit = None
+            if AskNewsToolkit is not None:
+                try:
+                    self.asknews_toolkit = AskNewsToolkit(api_key=settings.asknews_api_key)
+                    await self.asknews_toolkit.initialize()
+                except Exception as exc:
+                    log.warning("AskNews toolkit unavailable: %s", exc)
+                    self.asknews_toolkit = None
+
+            self.search_toolkit = None
+            if GoogleResearchToolkit is not None:
+                try:
+                    self.search_toolkit = GoogleResearchToolkit()
+                    await self.search_toolkit.initialize()
+                except Exception as exc:
+                    log.warning("Google research toolkit unavailable: %s", exc)
+                    self.search_toolkit = None
 
             tools = self.crypto_tools.get_all_tools()
             if self.stats_toolkit:
                 tools.extend(self.stats_toolkit.get_all_tools())
-            if self.playwright_toolkit:
-                tools.extend(self.playwright_toolkit.get_all_tools())
+            if self.asknews_toolkit:
+                tools.extend(self.asknews_toolkit.get_all_tools())
+            if self.search_toolkit:
+                tools.extend(self.search_toolkit.get_all_tools())
 
             # Create agent
             model = CamelModelFactory.create_worker_model()
@@ -78,8 +101,8 @@ class MarketResearchWorker:
                     "You are the Market Research & Narrative Specialist. For each request:\n"
                     "1. Clarify the asset, timeframe, and desired narrative (bullish/bearish catalysts).\n"
                     "2. Review guidry-cloud telemetry with get_guidry_cloud_api_stats to understand if forecasting data may be stale.\n"
-                    "3. Use research tools to aggregate news, social sentiment, and macro context. Validate sources and cite them.\n"
-                    "   When external validation is required, browse primary sources using Playwright tools (browse_url) headlessly.\n"
+                    "3. Use the AskNews and search toolkits to aggregate news, social sentiment, and macro context. Validate sources and cite them.\n"
+                    "   When URLs need deeper context, favour official sources returned by the tool output.\n"
                     "4. Produce concise insights that highlight catalysts, risks, sentiment skew, and data quality flags.\n"
                     "5. Return structured key points for downstream fusion, calling out any contradictions or missing data."
                 )

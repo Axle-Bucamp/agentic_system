@@ -40,7 +40,7 @@ python-multipart>=0.0.6
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 python-dotenv>=1.0.0
-playwright>=1.45.0
+asknews>=0.7.0
 
 # Optional agent dependencies
 autogen-agentchat>=0.2.0

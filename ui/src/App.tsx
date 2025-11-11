@@ -42,6 +42,7 @@ import {
   WalletPlan,
   WeightedNewsEntry,
   DashboardSettings,
+  ReviewSnapshot,
   PipelineLiveConfig,
   PipelineLiveEntry,
   AiDecision,
@@ -84,6 +85,20 @@ const formatPipelineName = (value: string) =>
     .split("_")
     .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
     .join(" ");
+
+const agentDisplayName = (value: string) => {
+  const normalized = value.toUpperCase();
+  const labels: Record<string, string> = {
+    TREND: "Trend",
+    FACT: "Fact",
+    DQN: "DQN",
+    CHART: "Chart",
+    COPYTRADE: "Copy Trade",
+    NEWS: "News",
+    RISK: "Risk",
+  };
+  return labels[normalized] ?? formatPipelineName(normalized.toLowerCase());
+};
 
 const approximateInterval = (seconds?: number) => {
   if (!seconds || seconds <= 0) return "n/a";
@@ -144,6 +159,7 @@ const App = () => {
   const [settingsDraft, setSettingsDraft] = useState<DashboardSettings | null>(null);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsBusy, setSettingsBusy] = useState<boolean>(false);
+  const [reviewSnapshot, setReviewSnapshot] = useState<ReviewSnapshot | null>(null);
   const [forecastTickers, setForecastTickers] = useState<string[]>([]);
   const [pipelineMessage, setPipelineMessage] = useState<string | null>(null);
   const [pipelineBusy, setPipelineBusy] = useState<boolean>(false);
@@ -223,6 +239,10 @@ const App = () => {
       if (settingsResponse.settings) {
         setSettingsState(settingsResponse.settings);
         setSettingsDraft(settingsResponse.settings);
+        setReviewSnapshot(settingsResponse.settings.latest_review_snapshot ?? null);
+      }
+      if (!settingsResponse.settings) {
+        setReviewSnapshot(null);
       }
       if (liveConfigResponse.intervals) {
         setPipelineIntervals(liveConfigResponse.intervals);
@@ -354,6 +374,36 @@ const App = () => {
   const copytradeEnabled = Boolean((agentStatus?.copytrade as { enabled?: boolean })?.enabled ?? true);
   const logfireEnabled = Boolean(agentStatus?.logfire_enabled);
 
+  const reviewWeights = useMemo(
+    () =>
+      reviewSnapshot?.weights
+        ? Object.entries(reviewSnapshot.weights).sort(([, a], [, b]) => b - a)
+        : ([] as Array<[string, number]>),
+    [reviewSnapshot],
+  );
+
+  const weightDelta = useCallback(
+    (agent: string, weight: number) => {
+      const previous = reviewSnapshot?.previous_weights?.[agent];
+      if (previous === undefined || previous === null) return "—";
+      const diff = weight - previous;
+      if (Math.abs(diff) < 0.0005) return "↔︎ 0.0%";
+      const arrow = diff > 0 ? "↑" : "↓";
+      return `${arrow} ${(Math.abs(diff) * 100).toFixed(1)}%`;
+    },
+    [reviewSnapshot],
+  );
+
+  const reviewMetrics = useMemo(
+    () =>
+      reviewSnapshot?.metrics
+        ? Object.entries(reviewSnapshot.metrics)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, 6)
+        : ([] as Array<[string, number]>),
+    [reviewSnapshot],
+  );
+
   const topFusionRows = useMemo(() => fusionItems.slice(0, 5), [fusionItems]);
 
   const graphNodeCount = graphSnapshot?.nodes.length ?? 0;
@@ -407,6 +457,7 @@ const App = () => {
       const response = await updateDashboardSettings(settingsDraft);
       setSettingsState(response.settings);
       setSettingsDraft(response.settings);
+      setReviewSnapshot(response.settings.latest_review_snapshot ?? reviewSnapshot ?? null);
       setSettingsMessage("Settings saved");
       void refresh();
     } catch (err) {
@@ -430,23 +481,37 @@ const App = () => {
     setPipelineMessage(null);
     try {
       let response: { success: boolean; message?: string } = { success: false };
+      let detail: string | undefined;
       if (pipeline === "trend") {
         if (!selectedTicker) throw new Error("Select a ticker first");
         const res = await runTrendPipeline(selectedTicker);
         response = { success: res.success, message: res.message };
+        if (res.success && res.assessment) {
+          detail = `${res.assessment.ticker} trend ${res.assessment.recommended_action} @ ${(res.assessment.confidence * 100).toFixed(1)}% (${res.assessment.agentic ? "agentic" : "fallback"})`;
+        }
       } else if (pipeline === "fact") {
         if (!selectedTicker) throw new Error("Select a ticker first");
         const res = await runFactPipeline(selectedTicker);
         response = { success: res.success, message: res.message };
+        if (res.success && res.insight) {
+          detail = `${res.insight.ticker} fact sentiment ${res.insight.sentiment_score.toFixed(2)} (${res.insight.agentic ? "agentic" : "fallback"})`;
+        }
       } else if (pipeline === "fusion") {
         if (!selectedTicker) throw new Error("Select a ticker first");
         const res = await runFusionPipeline(selectedTicker);
         response = { success: res.success, message: res.message };
+        if (res.success && res.recommendation) {
+          detail = `${res.recommendation.ticker} fusion ${res.recommendation.action} @ ${(res.recommendation.confidence * 100).toFixed(1)}% (${res.recommendation.agentic ? "agentic" : "fallback"})`;
+        }
       } else {
         const res = await runPrunePipeline();
         response = { success: res.success };
+        detail = res.success ? "Memory pruning pipeline executed" : undefined;
       }
-      const message = response.message || (response.success ? "Pipeline execution complete" : "Pipeline returned no result");
+      const message =
+        detail ||
+        response.message ||
+        (response.success ? "Pipeline execution complete" : "Pipeline returned no result");
       setPipelineMessage(message);
       if (response.success) {
         void refresh();
@@ -1136,6 +1201,74 @@ const App = () => {
           )}
         </section>
       </div>
+
+      <section className="section">
+        <div className="section-header" style={{ alignItems: "baseline" }}>
+          <h2>Agent Weight Review</h2>
+          {reviewSnapshot ? (
+            <div className="muted">
+              Generated {new Date(reviewSnapshot.generated_at).toLocaleString()}{" "}
+              {agenticBadge(reviewSnapshot.agentic)}
+            </div>
+          ) : (
+            <span className="muted">No review snapshot captured yet.</span>
+          )}
+        </div>
+
+        {reviewSnapshot ? (
+          <>
+            <p className="muted" style={{ marginBottom: "0.75rem" }}>
+              {reviewSnapshot.ai_explanation || "Review agent did not provide an explanation."}
+            </p>
+            <div style={{ overflowX: "auto", marginBottom: "0.75rem" }}>
+              <table className="allocation-table">
+                <thead>
+                  <tr>
+                    <th>Agent</th>
+                    <th>Weight</th>
+                    <th>Δ vs previous</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {reviewWeights.map(([agent, weight]) => (
+                    <tr key={agent}>
+                      <td>{agentDisplayName(agent)}</td>
+                      <td>{formatPercent(weight)}</td>
+                      <td>{weightDelta(agent, weight)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {reviewMetrics.length > 0 && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <strong>Top metric signals</strong>
+                <ul className="graph-list">
+                  {reviewMetrics.map(([agent, score]) => (
+                    <li key={agent}>
+                      <strong>{agentDisplayName(agent)}</strong>
+                      <span className="muted"> — score {score.toFixed(2)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {reviewSnapshot.failure_reason && (
+              <p className="muted">Note: {reviewSnapshot.failure_reason}</p>
+            )}
+            {reviewSnapshot.raw_response && (
+              <details>
+                <summary className="muted">View raw assistant output</summary>
+                <pre className="log-output">{reviewSnapshot.raw_response}</pre>
+              </details>
+            )}
+          </>
+        ) : (
+          <p className="muted">
+            Queue a weight review to populate this section and let the CAMEL reviewer rebalance agents.
+          </p>
+        )}
+      </section>
 
       <section className="section">
         <div className="section-header">

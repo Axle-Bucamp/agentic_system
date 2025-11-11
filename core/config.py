@@ -42,10 +42,11 @@ class Settings(BaseSettings):
     mcp_api_key: Optional[str] = Field(default="sk_jDHFvVDCU8bF4caeenG96jnKbYIET4wcDm3qBzNWXVc", env="MCP_API_KEY")
     dex_simulator_url: str = Field(default="http://localhost:8001", env="DEX_SIMULATOR_URL")
     cmc_api_key: Optional[str] = Field(default=None, env="CMC_API_KEY")
+    asknews_api_key: Optional[str] = Field(default=None, env="ASKNEWS_API_KEY")
     
     # Blockscout MCP Configuration
     blockscout_mcp_url: Optional[str] = Field(
-        default="http://blockscout-mcp:8080",
+        default="https://mcp.blockscout.com/mcp",
         env="BLOCKSCOUT_MCP_URL"
     )
     
@@ -102,7 +103,7 @@ class Settings(BaseSettings):
         default="Review recent agent performance, adjust coordination weights to maximize risk-adjusted returns, and surface rationale for any changes. Keep weights normalized to 1.0.",
         env="REVIEW_PROMPT_DEFAULT",
     )
-    news_llm_model: str = Field(default="openai/gpt-4o-mini", env="NEWS_LLM_MODEL")
+    news_llm_model: str = Field(default="openrouter_llama_4_maverick_free", env="NEWS_LLM_MODEL")
     
     # Ollama Configuration
     ollama_url: str = Field(default="http://ollama:11434", env="OLLAMA_URL")

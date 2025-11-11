@@ -3,10 +3,19 @@ CAMEL Model Configuration Factory
 
 Supports multiple model providers: OpenAI, Gemini, and local models.
 """
+from pathlib import Path
+import sys
 from typing import Optional, Dict, Any, Callable
 import httpx
 from core.config import settings
 from core.logging import log
+
+# Allow bundling the upstream CAMEL repository alongside this project
+_local_camel_repo = Path(__file__).resolve().parents[2] / "camel"
+if _local_camel_repo.exists():
+    repo_path = str(_local_camel_repo)
+    if repo_path not in sys.path:
+        sys.path.insert(0, repo_path)
 
 try:
     from camel.types import ModelType, ModelPlatformType

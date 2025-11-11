@@ -24,7 +24,17 @@ from core import asset_registry
 from core.telemetry.guidry_stats import guidry_cloud_stats
 from core.camel_tools.market_data_toolkit import MarketDataToolkit
 from core.camel_tools.mcp_forecasting_toolkit import MCPForecastingToolkit
-from core.camel_tools.playwright_toolkit import PlaywrightToolkit
+from core.camel_tools.review_pipeline_toolkit import ReviewPipelineToolkit
+
+try:
+    from core.camel_tools.asknews_toolkit import AskNewsToolkit
+except ImportError:  # pragma: no cover - optional dependency
+    AskNewsToolkit = None  # type: ignore
+
+try:
+    from core.camel_tools.google_research_toolkit import GoogleResearchToolkit
+except ImportError:  # pragma: no cover - optional dependency
+    GoogleResearchToolkit = None  # type: ignore
 
 
 AsyncFn = Callable[..., Awaitable[Any]]
@@ -47,7 +57,9 @@ class ToolkitRegistry:
         self._dex_client: Optional[DEXSimulatorClient] = None
         self._tool_cache: Dict[str, FunctionTool] = {}
         self._lock = asyncio.Lock()
-        self._playwright_toolkit: Optional[PlaywrightToolkit] = None
+        self._asknews_toolkit: Optional[AskNewsToolkit] = None
+        self._search_toolkit: Optional[GoogleResearchToolkit] = None
+        self._review_toolkit: Optional[ReviewPipelineToolkit] = None
 
     async def ensure_clients(self) -> None:
         """Initialise shared service clients once."""
@@ -68,9 +80,32 @@ class ToolkitRegistry:
                 await self._dex_client.connect()
                 log.info("Toolkit registry connected DEX simulator client")
 
-            if self._playwright_toolkit is None:
-                self._playwright_toolkit = PlaywrightToolkit()
-                log.info("Toolkit registry prepared Playwright toolkit")
+            if self._asknews_toolkit is None and AskNewsToolkit is not None:
+                try:
+                    self._asknews_toolkit = AskNewsToolkit(api_key=settings.asknews_api_key)
+                    await self._asknews_toolkit.initialize()
+                    log.info("Toolkit registry prepared AskNews toolkit")
+                except Exception as exc:
+                    log.debug("AskNews toolkit initialisation failed: %s", exc)
+                    self._asknews_toolkit = None
+
+            if self._search_toolkit is None and GoogleResearchToolkit is not None:
+                try:
+                    self._search_toolkit = GoogleResearchToolkit()
+                    await self._search_toolkit.initialize()
+                    log.info("Toolkit registry prepared Google research toolkit")
+                except Exception as exc:
+                    log.debug("Google research toolkit initialisation failed: %s", exc)
+                    self._search_toolkit = None
+
+            if self._review_toolkit is None:
+                try:
+                    self._review_toolkit = ReviewPipelineToolkit()
+                    await self._review_toolkit.initialize()
+                    log.info("Toolkit registry prepared Review pipeline toolkit")
+                except Exception as exc:  # pragma: no cover - optional dependency
+                    log.debug("Review pipeline toolkit initialisation failed: %s", exc)
+                    self._review_toolkit = None
 
     async def get_default_toolset(self) -> List[FunctionTool]:
         """
@@ -92,8 +127,15 @@ class ToolkitRegistry:
             self._tool("dex_sell_asset", self._tool_dex_sell_asset),
             self._tool("dex_get_portfolio", self._tool_dex_get_portfolio),
             self._tool("get_guidry_cloud_api_stats", self._tool_get_guidry_stats),
-            self._tool("browse_url", self._tool_browse_url),
         ]
+
+        if self._asknews_toolkit:
+            tools.extend(self._asknews_toolkit.get_all_tools())
+        if self._search_toolkit:
+            tools.extend(self._search_toolkit.get_all_tools())
+        if self._review_toolkit:
+            tools.extend(self._review_toolkit.get_all_tools())
+
         return tools
 
     # ------------------------------------------------------------------

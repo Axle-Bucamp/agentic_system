@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 from core.models import NewsMemoryEntry
+from core.config import settings
 
 client = TestClient(app)
 
@@ -41,6 +42,9 @@ async def test_trend_pipeline_endpoint(fake_redis):
     body = response.json()
     assert body["success"] is True
     assert body["assessment"]["ticker"] == "BTC"
+    assert body["assessment"]["agentic"] is True
+    assert isinstance(body["assessment"]["ai_explanation"], str) and body["assessment"]["ai_explanation"]
+    assert "blended_score" in body["assessment"]["supporting_signals"]
 
 
 @pytest.mark.asyncio
@@ -64,7 +68,8 @@ async def test_trend_pipeline_endpoint_with_partial_inputs(fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_fact_pipeline_endpoint(fake_redis):
+async def test_fact_pipeline_endpoint(fake_redis, monkeypatch):
+    monkeypatch.setattr(settings, "cmc_api_key", None, raising=False)
     now = datetime.utcnow()
     entry = NewsMemoryEntry(
         news_id="id1",
@@ -77,12 +82,24 @@ async def test_fact_pipeline_endpoint(fake_redis):
         metadata={},
         timestamp=now,
     )
-    await fake_redis.rpush("memory:news", entry.json())
+    await fake_redis.set_json(
+        "memory:news:weighted:BTC",
+        {
+            "weighted_score": 0.4,
+            "total_weight": 1.2,
+            "last_updated": now.isoformat(),
+        },
+    )
+    await fake_redis.rpush("memory:news:BTC", entry.json())
     response = client.post("/api/pipelines/fact/run", json={"ticker": "BTC"})
     assert response.status_code == 200
     body = response.json()
-    # Fact pipeline might fail without external dependencies; ensure graceful response
-    assert body["success"] in (True, False)
+    assert body["success"] is True
+    insight = body["insight"]
+    assert insight["agentic"] is True
+    assert isinstance(insight["ai_explanation"], str) and insight["ai_explanation"]
+    assert insight["sentiment_breakdown"]["aggregate_score"] is not None
+    assert "news_sentiment" in insight["sentiment_breakdown"]["components"]
 
 
 @pytest.mark.asyncio
@@ -99,6 +116,8 @@ async def test_fusion_pipeline_endpoint(fake_redis):
             "confidence": 0.8,
             "supporting_signals": {},
             "generated_at": now,
+            "agentic": True,
+            "ai_explanation": "trend explanation",
         },
     )
     await fake_redis.set_json(
@@ -111,6 +130,16 @@ async def test_fusion_pipeline_endpoint(fake_redis):
             "references": [],
             "anomalies": [],
             "generated_at": now,
+            "agentic": True,
+            "ai_explanation": "fact explanation",
+            "sentiment_breakdown": {
+                "aggregate_score": 0.3,
+                "total_weight": 1.0,
+                "components": {
+                    "news_sentiment": {"score": 0.3, "weight": 1.0, "last_updated": now},
+                },
+            },
+            "market_indicators": {},
         },
     )
     await fake_redis.set_json(
@@ -121,6 +150,7 @@ async def test_fusion_pipeline_endpoint(fake_redis):
             "risk_score": 0.1,
             "warnings": [],
             "timestamp": now,
+            "agentic": True,
         },
     )
     response = client.post("/api/pipelines/fusion/run", json={"ticker": "BTC"})
@@ -128,6 +158,9 @@ async def test_fusion_pipeline_endpoint(fake_redis):
     body = response.json()
     assert body["success"] is True
     assert body["recommendation"]["ticker"] == "BTC"
+    assert body["recommendation"]["agentic"] is True
+    assert isinstance(body["recommendation"]["ai_explanation"], str) and body["recommendation"]["ai_explanation"]
+    assert "market_regime_bias" in body["recommendation"]["components"]
 
 
 @pytest.mark.asyncio

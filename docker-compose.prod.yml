@@ -289,47 +289,6 @@ services:
           memory: 256M
           cpus: '0.25'
 
-  # Copy Trade Agent Service
-  copytrade-agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-      args:
-        AGENT_NAME: copytrade
-    container_name: ats-copytrade-agent-prod
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - AGENT_NAME=copytrade
-      - BSC_RPC_URL=${BSC_RPC_URL}
-      - ETH_RPC_URL=${ETH_RPC_URL}
-      - SOL_RPC_URL=${SOL_RPC_URL}
-      - SENTRY_DSN=${SENTRY_DSN}
-      - JAEGER_AGENT_HOST=jaeger
-      - JAEGER_AGENT_PORT=14268
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - ats-network
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.25'
-
   # Orchestrator Agent Service
   orchestrator:
     build:
@@ -366,8 +325,6 @@ services:
       risk-agent:
         condition: service_started
       news-agent:
-        condition: service_started
-      copytrade-agent:
         condition: service_started
     restart: unless-stopped
     networks:
